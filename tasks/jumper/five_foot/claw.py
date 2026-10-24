@@ -416,6 +416,20 @@ LF_GRASP: dict[str, float] = {
     FINGER_JOINT: GRIPPER_OPEN,  # -37.2 deg, the claw's nominal; see above
 }
 
+#: Contact-validated hold used for payload fine-tuning, not the default stow.
+#: Derived with ``tools/grasp_pose.py`` on V1.6.1 and validated with the 188 g
+#: notebook under real jaw contact: 20/20 at the centre and 26/27 over a
+#: three-axis +/-5 mm grid centred 7.5 mm deeper (native CPU, 2026-10-06).
+#: The training option holds this pose exactly; its surrounding +/-0.10 rad box
+#: has not been cleared and must not inherit ``LF_GRASP_BOX`` silently.
+LF_GRASP_READY: dict[str, float] = {
+    "LF_J0_joint": -0.87566764,
+    "LF_J1_joint": -1.44724518,
+    "LF_J2_joint": -0.84847052,
+    "LF_J3_joint": 0.54775259,
+    FINGER_JOINT: GRIPPER_OPEN,
+}
+
 #: Half-width of the per-episode randomisation of the hold, in radians.
 #:
 #: The arm is out of the action but **not** at one fixed angle: each episode it is
@@ -665,6 +679,7 @@ __all__ = [
     "LEG_FOOT",
     "LF_GRASP",
     "LF_GRASP_BOX",
+    "LF_GRASP_READY",
     "OBSERVED_JOINTS",
     "PAYLOAD_BODY",
     "PAYLOAD_CYLINDER",

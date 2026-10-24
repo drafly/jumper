@@ -524,7 +524,11 @@ def stance(claw: Claw) -> None:
 
     print(f"\npayload at {PAYLOAD_BODY}")
     body = claw._id(mujoco.mjtObj.mjOBJ_BODY, PAYLOAD_BODY)
-    shoulder = claw.d.xpos[claw._id(mujoco.mjtObj.mjOBJ_BODY, f"{CARRIED_LEG}_J1_link")]
+    # J1 is the shoulder-pitch joint at the origin of the upper-arm body.  The
+    # joint and body use different spellings in the source model.
+    shoulder = claw.d.xpos[
+        claw._id(mujoco.mjtObj.mjOBJ_BODY, f"{CARRIED_LEG}_upper_arm_link")
+    ]
     at = claw.d.xipos[body]
     arm_m = float(np.linalg.norm((at - shoulder)[:2]))
     base_com, base_mass = claw.com()

@@ -549,6 +549,19 @@ SOLIDS: tuple[Solid, ...] = (
           (0.00, 0.33, 0.66, 1.0), parts=_CAN_PARTS),
 )
 
+#: A validation/training prop for the push fallback.  It is deliberately not in
+#: ``SOLIDS``: the grasping row remains the three real hand-held objects, while
+#: this low, broad box appears only when the push fixture is explicitly enabled.
+#: Its 120 x 100 mm support footprint and 70 mm height put the 60 mm claw contact
+#: below the Coulomb tipping threshold at the scene's 0.35 floor friction.
+PUSH_BOX = Solid(
+    "push_box",
+    "box",
+    (0.060, 0.050, 0.035),
+    0.188,
+    (0.18, 0.55, 0.85, 1.0),
+)
+
 
 def _solid_spec(solid: Solid) -> Any:
     """A free body holding `solid`'s shape and its parts, each at its own density."""
@@ -1045,6 +1058,60 @@ def apply_objects(env_cfg: Any) -> None:
     terrain.textures = ()
     terrain.materials = ()
     terrain.lights = _lights()
+
+
+def apply_training_notebook(env_cfg: Any) -> None:
+    """Add only the physical notebook and the friction model that can hold it.
+
+    Unlike :func:`apply_objects`, this is a training fixture rather than a replay
+    scene: it adds no row, tray, highlight or fixed robot spawn. The notebook's
+    reset pose is supplied after the robot has been reset. Keeping the fixture to
+    one free body matters at training environment counts, where every environment
+    receives its own copy.
+    """
+    import warnings
+
+    env_cfg.sim.nconmax = max(int(env_cfg.sim.nconmax or 0), OBJECTS_NCONMAX)
+    env_cfg.sim.njmax = max(int(env_cfg.sim.njmax or 0), OBJECTS_NJMAX)
+    env_cfg.sim.mujoco.cone = PROP_CONE
+    env_cfg.sim.mujoco.impratio = PROP_IMPRATIO
+
+    notebook = next(solid for solid in SOLIDS if solid.name == "notebook")
+    entities = env_cfg.scene.entities
+    if notebook.name in entities:
+        raise ValueError("the contact-notebook fixture would overwrite entity 'notebook'")
+    entities[notebook.name] = _prop(partial(_solid_spec, notebook), (0.0, 0.0, 0.0))
+    warnings.warn(
+        "--contact-notebook adds one physical 0.188 kg notebook per environment "
+        f"and changes the whole model to {PROP_CONE} friction at impratio "
+        f"{PROP_IMPRATIO:g}; resume/fine-tune a walking policy rather than comparing "
+        "this run directly with the empty-claw task.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+
+def apply_training_push_box(env_cfg: Any) -> None:
+    """Add only the free 188 g low-profile box used for push fine-tuning."""
+    import warnings
+
+    env_cfg.sim.nconmax = max(int(env_cfg.sim.nconmax or 0), OBJECTS_NCONMAX)
+    env_cfg.sim.njmax = max(int(env_cfg.sim.njmax or 0), OBJECTS_NJMAX)
+    env_cfg.sim.mujoco.cone = PROP_CONE
+    env_cfg.sim.mujoco.impratio = PROP_IMPRATIO
+
+    entities = env_cfg.scene.entities
+    if PUSH_BOX.name in entities:
+        raise ValueError("the contact-push fixture would overwrite entity 'push_box'")
+    entities[PUSH_BOX.name] = _prop(partial(_solid_spec, PUSH_BOX), (0.0, 0.0, 0.0))
+    warnings.warn(
+        "--contact-push-box adds one physical 0.188 kg, 120 x 100 x 70 mm box "
+        f"per environment and changes the whole model to {PROP_CONE} friction at "
+        f"impratio {PROP_IMPRATIO:g}; the box remains a free rigid body moved only "
+        "by contact.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 def _highlight_event_terms() -> dict[str, Any]:

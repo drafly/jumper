@@ -1,0 +1,64 @@
+{
+  "task": "jumper.five_foot",
+  "checkpoint": "logs/jumper/jumper.five_foot/2026-10-21_22-52-37/model_87198.pt",
+  "seed": 2,
+  "object": "push_box",
+  "orientation": "upright",
+  "interaction": "rigid_body_contact_push",
+  "parameters": {
+    "distance_m": 0.08,
+    "speed_m_s": 0.35,
+    "lateral_speed_m_s": 0.0,
+    "backoff_lateral_speed_m_s": -0.15,
+    "initial_gap_mm": 0.0,
+    "shoulder_offset_rad": 0.15,
+    "pitch_deg": 0.0,
+    "open_guide": false,
+    "backoff_m": 0.05,
+    "max_lateral_m": 0.1
+  },
+  "trials": [
+    {
+      "trial": 1,
+      "success": true,
+      "failure": null,
+      "contact_steps": 39,
+      "object_forward_m": 0.08811697363853455,
+      "object_lateral_m": 0.021401196718215942,
+      "object_planar_distance_m": 0.0906786248087883,
+      "object_tilt_deg": 0.011216369987725119,
+      "base_forward_m": 0.06559550762176514,
+      "stopped_stably": true,
+      "backed_away_m": 0.06846381723880768,
+      "object_motion_during_retract_m": 0.0,
+      "object_motion_during_backoff_m": 0.0,
+      "fell": false,
+      "nonfoot_ground_contact": false,
+      "nonfoot_contact": null
+    },
+    {
+      "trial": 2,
+      "success": true,
+      "failure": null,
+      "contact_steps": 47,
+      "object_forward_m": 0.08795684576034546,
+      "object_lateral_m": 0.02689431607723236,
+      "object_planar_distance_m": 0.09197668731212616,
+      "object_tilt_deg": 0.0,
+      "base_forward_m": 0.0872265100479126,
+      "stopped_stably": true,
+      "backed_away_m": 0.061337199062108994,
+      "object_motion_during_retract_m": 0.0,
+      "object_motion_during_backoff_m": 0.0,
+      "fell": false,
+      "nonfoot_ground_contact": false,
+      "nonfoot_contact": null
+    }
+  ],
+  "summary": {
+    "successes": 2,
+    "trials": 2,
+    "falls": 0,
+    "nonfoot_ground_contacts": 0
+  }
+}

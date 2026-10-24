@@ -50,14 +50,18 @@ usable: with one convex hull per jaw link the mouth is filled in and an object
 cannot get between the jaws at all. `tasks/jumper/five_foot/tools/jaw_decompose.py` cuts them and
 `five_foot/jaws.py` puts them on this task's robot -- and on no other task's.
 
-## Replay only
+## Replay and explicit contact fine-tuning
 
-`ClawHold` is installed in replay only, like the claw's teleop: the policy never
-drives the finger, and there are no props in training.
+`ClawHold` remains replay-only.  The opt-in ``--contact-notebook`` training mode
+below is different: it resets one free rigid notebook into the mouth, holds the
+same bounded finger target as the operator, and terminates a rollout when that
+physical load leaves the claw.  It never attaches or rewrites the prop after
+reset.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -65,6 +69,12 @@ import mujoco
 import numpy as np
 import torch
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.utils.lab_api.math import (
+    matrix_from_quat,
+    quat_apply,
+    quat_from_euler_xyz,
+    quat_mul,
+)
 from scipy.spatial import ConvexHull, cKDTree
 
 from ..claw import (
@@ -73,6 +83,7 @@ from ..claw import (
     GRIPPER_OPEN,
     KNUCKLE_CLEAR,
     LF_GRASP,
+    LF_GRASP_READY,
 )
 from .gripper import GripperTeleop, squeeze_limited
 
@@ -80,6 +91,9 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 __all__ = [
+    "CONTACT_CLOSE_STEPS",
+    "CONTACT_LIFT_STEPS",
+    "CONTACT_RESTART_STEP",
     "HOLD_DEPTH",
     "HOLD_STEPS",
     "PLACE_STEPS",
@@ -87,7 +101,21 @@ __all__ = [
     "Claw",
     "ClawHold",
     "claw_hold_event",
+    "contact_carry_clearance",
+    "contact_grip_event",
+    "contact_load_lost",
+    "contact_not_lifted",
+    "reset_notebook_grasp",
 ]
+
+# Phase timing shared by the physical contact fine-tune and its staged velocity
+# command.  These are the validated slow action's 100-step close and 100-step
+# lift, followed by 25 stationary steps before locomotion restarts.  Keeping the
+# numbers together prevents the arm event, command and lift termination from
+# silently training three different trajectories.
+CONTACT_CLOSE_STEPS = 100
+CONTACT_LIFT_STEPS = 100
+CONTACT_RESTART_STEP = CONTACT_CLOSE_STEPS + CONTACT_LIFT_STEPS + 25
 
 #: How far off the anvil a prop is parked when something puts one in the claw --
 #: `play --hold`, and `tasks/jumper/five_foot/tools/grasp_objects.py` -- in metres.
@@ -230,6 +258,13 @@ def _quat_to_mat(quat: np.ndarray) -> np.ndarray:
     return mat.reshape(3, 3)
 
 
+def _row_matmul(vec: torch.Tensor, mat: torch.Tensor) -> torch.Tensor:
+    """Multiply row vectors by one matrix or one matrix per batch row."""
+    if mat.ndim == 2:
+        return vec @ mat
+    return torch.einsum("bi,bij->bj", vec, mat)
+
+
 def _seat_position(
     anvil: torch.Tensor,
     closing: torch.Tensor,
@@ -253,8 +288,14 @@ def _seat_position(
     below = torch.zeros(count, device=anvil.device, dtype=anvil.dtype)
     far = torch.zeros(count, device=anvil.device, dtype=anvil.dtype)
     for gtype, size, pos, rot in shapes:
-        below = torch.maximum(below, _support(down @ rot, gtype, size) + down @ pos)
-        far = torch.maximum(far, _support(closing @ rot, gtype, size) + closing @ pos)
+        below = torch.maximum(
+            below,
+            _support(_row_matmul(down, rot), gtype, size) + (down * pos).sum(dim=1),
+        )
+        far = torch.maximum(
+            far,
+            _support(_row_matmul(closing, rot), gtype, size) + (closing * pos).sum(dim=1),
+        )
     lowest = floor + below + clearance
 
     def place(offset: torch.Tensor) -> torch.Tensor:
@@ -264,7 +305,7 @@ def _seat_position(
     def gap(centre: torch.Tensor) -> torch.Tensor:
         nearest = torch.full((count,), float("inf"), device=anvil.device, dtype=anvil.dtype)
         for gtype, size, pos, rot in shapes:
-            local = (anvil - centre - pos) @ rot
+            local = _row_matmul(anvil - centre - pos, rot)
             nearest = torch.minimum(nearest, _surface_distance(local, gtype, size))
         return nearest
 
@@ -502,6 +543,11 @@ class Claw:
 
     def __init__(self, env: ManagerBasedRlEnv) -> None:
         model = env.sim.mj_model
+        # Native training strips visual meshes from each per-environment model
+        # at larger batch sizes. The one full render model is retained precisely
+        # for geometry that needs the drawn surface; collision and live body ids
+        # still come from the slim simulation model below.
+        geometry_model = env.sim.render_model
         self._model = model
         self._robot = env.scene["robot"]
         self.palm = self._robot.find_bodies(["LF_palm_link"])[0][0]
@@ -509,9 +555,9 @@ class Claw:
         def vec(value: np.ndarray) -> torch.Tensor:
             return torch.tensor(value, device=env.device, dtype=torch.float32)
 
-        self.mouth_palm = vec(_mouth_in_palm(model))
-        self.closing_palm = vec(_closing_in_palm(model))
-        self.inward_palm = vec(_inward_in_palm(model))
+        self.mouth_palm = vec(_mouth_in_palm(geometry_model))
+        self.closing_palm = vec(_closing_in_palm(geometry_model))
+        self.inward_palm = vec(_inward_in_palm(geometry_model))
 
     def _world(self, vec: torch.Tensor) -> torch.Tensor:
         quat = self._robot.data.body_link_quat_w[:, self.palm]
@@ -521,7 +567,13 @@ class Claw:
         """The anvil in the world, `[num_envs, 3]`."""
         return self._robot.data.body_link_pos_w[:, self.palm] + self._world(self.mouth_palm)
 
-    def seat(self, env: ManagerBasedRlEnv, prop: str, depth: float = HOLD_DEPTH) -> torch.Tensor:
+    def seat(
+        self,
+        env: ManagerBasedRlEnv,
+        prop: str,
+        depth: float = HOLD_DEPTH,
+        quat: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Where `prop`'s origin goes to be squeezed in the claw, `[num_envs, 3]`.
 
         Upright and unrotated, its nearest surface `SEAT_CLEARANCE` from the anvil
@@ -555,8 +607,262 @@ class Claw:
         # each geom's own placement on the body is left to account for.
         shapes = [_geom_shape(model, g, mouth.device, mouth.dtype)
                   for g in _prop_geoms(model, prop)]
+        if quat is not None:
+            # Turn the prop with the robot's reset yaw. Shape rotations are
+            # local-to-world, while `_seat_position` multiplies world row vectors
+            # by world-to-local, hence `prop @ geom` in row-vector form.
+            basis = torch.eye(3, device=mouth.device, dtype=mouth.dtype).expand(
+                quat.shape[0], 3, 3
+            )
+            prop_rot = torch.stack(
+                [_rotate(quat, basis[:, :, axis]) for axis in range(3)], dim=2
+            )
+            shapes = [
+                (
+                    gtype,
+                    size,
+                    _rotate(quat, pos.expand(quat.shape[0], 3)),
+                    prop_rot @ rot,
+                )
+                for gtype, size, pos, rot in shapes
+            ]
         floor = env.scene.env_origins[:, 2].to(dtype=mouth.dtype)
         return _seat_position(mouth, closing, floor, shapes) + inward * depth
+
+
+_RESET_CLAWS: dict[int, Claw] = {}
+
+
+def reset_notebook_grasp(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    *,
+    prop: str = "notebook",
+    depth: float = HOLD_DEPTH,
+    center_offset_m: tuple[float, float, float] = (0.0125, 0.0, 0.0),
+    offset_half_range_m: tuple[float, float, float] = (0.0025, 0.0025, 0.0),
+    pitch_range_rad: tuple[float, float] = (-math.radians(2.0), math.radians(2.0)),
+) -> None:
+    """Randomize a notebook once at reset, then let contact and friction own it.
+
+    Earlier reset terms have written the robot root and the exact grasp-ready arm
+    pose. ``forward`` makes those writes visible to link-space geometry before
+    this term computes the notebook pose. The only writes here are the notebook's
+    reset state and the finger's position target; there is deliberately no step
+    event, weld, equality constraint or kinematic attachment after this call.
+
+    The centre is the +12.5 mm forward offset that reached 8/10 independent
+    50 mm carries on native CPU (2026-10-11). Each reset samples +/-2.5 mm in
+    forward/lateral position and +/-2 degrees of pitch, so the fine-tune cannot
+    memorize the single fixture pose used to find that centre. The offset is in
+    the robot frame and therefore rotates with the randomized base yaw.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env.sim.forward()
+    claw = _RESET_CLAWS.setdefault(id(env), Claw(env))
+    robot = env.scene["robot"]
+    robot_quat = robot.data.root_link_quat_w
+    pitch = torch.zeros(env.num_envs, device=env.device)
+    pitch[env_ids] = torch.empty(len(env_ids), device=env.device).uniform_(
+        *pitch_range_rad
+    )
+    zeros = torch.zeros_like(pitch)
+    object_quat = quat_mul(
+        robot_quat,
+        quat_from_euler_xyz(zeros, pitch, zeros),
+    )
+    local_offset = torch.zeros(env.num_envs, 3, device=env.device)
+    centre = torch.tensor(center_offset_m, device=env.device)
+    half_range = torch.tensor(offset_half_range_m, device=env.device)
+    samples = 2.0 * torch.rand(len(env_ids), 3, device=env.device) - 1.0
+    local_offset[env_ids] = centre + samples * half_range
+    position = (
+        claw.seat(env, prop, depth=depth, quat=object_quat)
+        + quat_apply(robot_quat, local_offset)
+    )[env_ids]
+    prop_entity = env.scene[prop]
+    prop_entity.write_root_link_pose_to_sim(
+        torch.cat([position, object_quat[env_ids]], dim=1), env_ids=env_ids
+    )
+    prop_entity.write_root_com_velocity_to_sim(
+        torch.zeros(len(env_ids), 6, device=env.device), env_ids=env_ids
+    )
+
+
+def maintain_contact_grip(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None = None,
+    close_steps: int = CONTACT_CLOSE_STEPS,
+    lift_steps: int = CONTACT_LIFT_STEPS,
+    lift_rad: float = 0.30,
+    **_: Any,
+) -> None:
+    """Close on the notebook, lift it physically, and hold the trigger.
+
+    This is the operator path's bounded target lead: the finger actuator supplies
+    normal force and MuJoCo friction supplies the hold. The prop is never written
+    after reset, so a weak or badly aligned grasp remains free to slip and fall.
+    After 100 control steps the shoulder ramps through the same -0.30 rad lift
+    used by ``tools/grasp_objects.py`` over two seconds.  This matches the slow
+    action that improved the 100 mm seed-0 result to 6/10; the staged contact
+    command keeps velocity at zero until this ramp and a 25-step settling window
+    are complete.  The policy therefore learns the loaded restart state rather
+    than walking while the operator would still be closing or lifting.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    robot = env.scene["robot"]
+    finger = robot.find_joints([FINGER_JOINT])[0][0]
+    angle = robot.data.joint_pos[env_ids][:, [finger]]
+    closed = torch.full_like(angle, GRIPPER_CLOSED)
+    robot.set_joint_position_target(
+        squeeze_limited(closed, angle).squeeze(1),
+        joint_ids=[finger],
+        env_ids=env_ids,
+    )
+    shoulder = robot.find_joints(["LF_J1_joint"])[0][0]
+    rest = LF_GRASP_READY["LF_J1_joint"]
+    lift_progress = (
+        (env.episode_length_buf[env_ids] - close_steps).clamp(0, lift_steps)
+        / float(lift_steps)
+    )
+    shoulder_target = rest - lift_rad * lift_progress
+    robot.set_joint_position_target(
+        shoulder_target, joint_ids=[shoulder], env_ids=env_ids
+    )
+
+
+def contact_grip_event() -> EventTermCfg:
+    """A physical trigger hold for real-contact load fine-tuning."""
+    return EventTermCfg(func=maintain_contact_grip, mode="step", params={})
+
+
+def reset_push_box(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    *,
+    prop: str = "push_box",
+    half_extent_x_m: float = 0.060,
+    half_height_m: float = 0.035,
+    gap_m: float = 0.0,
+) -> None:
+    """Place a free box just ahead of the closed claw once at reset.
+
+    The pose write is an initial-condition fixture only.  No step event writes
+    the box, applies a force, or constrains it; after reset MuJoCo contact is the
+    only way it can move.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env.sim.forward()
+    claw = _RESET_CLAWS.setdefault(id(env), Claw(env))
+    robot = env.scene["robot"]
+    robot_quat = robot.data.root_link_quat_w
+    local_forward = torch.zeros(env.num_envs, 3, device=env.device)
+    local_forward[:, 0] = half_extent_x_m + gap_m
+    position = claw.mouth() + quat_apply(robot_quat, local_forward)
+    position[:, 2] = env.scene.env_origins[:, 2] + half_height_m
+    prop_entity = env.scene[prop]
+    prop_entity.write_root_link_pose_to_sim(
+        torch.cat([position[env_ids], robot_quat[env_ids]], dim=1), env_ids=env_ids
+    )
+    prop_entity.write_root_com_velocity_to_sim(
+        torch.zeros(len(env_ids), 6, device=env.device), env_ids=env_ids
+    )
+
+
+def maintain_push_claw(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None = None,
+    **_: Any,
+) -> None:
+    """Keep the real finger servo closed while the base pushes the free box."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    robot = env.scene["robot"]
+    finger = robot.find_joints([FINGER_JOINT])[0][0]
+    angle = robot.data.joint_pos[env_ids][:, [finger]]
+    closed = torch.full_like(angle, GRIPPER_CLOSED)
+    robot.set_joint_position_target(
+        squeeze_limited(closed, angle).squeeze(1),
+        joint_ids=[finger],
+        env_ids=env_ids,
+    )
+
+
+def push_claw_event() -> EventTermCfg:
+    """Hold the physical push face; the prop itself remains unconstrained."""
+    return EventTermCfg(func=maintain_push_claw, mode="step", params={})
+
+
+def contact_load_lost(
+    env: ManagerBasedRlEnv,
+    prop: str = "notebook",
+    grace_steps: int = 50,
+    max_distance_m: float = 0.075,
+) -> torch.Tensor:
+    """End a rollout once the free prop has left the physical claw.
+
+    This only observes the prop-to-mouth distance. It never moves the prop and
+    creates no equality, weld, mocap body or force; losing contact therefore
+    remains an ordinary rigid-body failure that the policy must avoid through
+    its five supporting legs.
+    """
+    claw = _RESET_CLAWS.setdefault(id(env), Claw(env))
+    distance = torch.linalg.norm(
+        env.scene[prop].data.root_link_pos_w - claw.mouth(), dim=1
+    )
+    return (env.episode_length_buf >= grace_steps) & (distance > max_distance_m)
+
+
+def _notebook_floor_clearance(
+    env: ManagerBasedRlEnv,
+    prop: str,
+    half_extents_m: tuple[float, float, float],
+) -> torch.Tensor:
+    """Return the oriented notebook's lowest-point clearance from the floor."""
+    entity = env.scene[prop]
+    rotation = matrix_from_quat(entity.data.root_link_quat_w)
+    half_extents = torch.tensor(
+        half_extents_m,
+        device=env.device,
+        dtype=entity.data.root_link_pos_w.dtype,
+    )
+    vertical_extent = (rotation[:, 2, :].abs() * half_extents).sum(dim=1)
+    floor = env.scene.env_origins[:, 2]
+    return entity.data.root_link_pos_w[:, 2] - floor - vertical_extent
+
+
+def contact_carry_clearance(
+    env: ManagerBasedRlEnv,
+    prop: str = "notebook",
+    half_extents_m: tuple[float, float, float] = (0.0525, 0.015, 0.0725),
+    grace_steps: int = 50,
+    target_clearance_m: float = 0.015,
+) -> torch.Tensor:
+    """Reward a free notebook for physically clearing the floor after the lift.
+
+    This reads the free body's pose only. A notebook left on the floor scores
+    zero; one held at least 15 mm clear scores one. Gating the signal until after
+    closure and shoulder lift prevents the reset fixture itself earning reward.
+    """
+    live = (env.episode_length_buf >= grace_steps).to(dtype=torch.float32)
+    clearance = _notebook_floor_clearance(env, prop, half_extents_m)
+    return live * (clearance / target_clearance_m).clamp(0.0, 1.0)
+
+
+def contact_not_lifted(
+    env: ManagerBasedRlEnv,
+    prop: str = "notebook",
+    half_extents_m: tuple[float, float, float] = (0.0525, 0.015, 0.0725),
+    grace_steps: int = 75,
+    minimum_clearance_m: float = 0.002,
+) -> torch.Tensor:
+    """End a contact fine-tune rollout when the commanded lift left the prop down."""
+    live = env.episode_length_buf >= grace_steps
+    clearance = _notebook_floor_clearance(env, prop, half_extents_m)
+    return live & (clearance < minimum_clearance_m)
 
 
 class ClawHold:

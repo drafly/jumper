@@ -77,5 +77,47 @@ def runner_cls() -> type:
     """mjlab's velocity runner, which logs extra velocity tracking metrics, with
     the curriculum levels added to its checkpoints (`common/runner.py`)."""
     from ..common.runner import CurriculumRunner
+    from .mdp.contact_command import ContactCarryVelocityCommand
 
-    return CurriculumRunner
+    class FiveFootRunner(CurriculumRunner):
+        """Keep phase-matched contact episodes synchronized at process start."""
+
+        def learn(
+            self,
+            num_learning_iterations: int,
+            init_at_random_ep_len: bool = False,
+        ) -> None:
+            twist = self.env.unwrapped.command_manager.get_term("twist")
+            if isinstance(twist, ContactCarryVelocityCommand):
+                import torch
+
+                if init_at_random_ep_len:
+                    print(
+                        "[five_foot] contact fine-tune starts every environment at "
+                        "phase zero; initial episode-length randomization is disabled"
+                    )
+                init_at_random_ep_len = False
+                distribution = self.alg.get_policy().distribution
+                std_param = getattr(distribution, "std_param", None)
+                if std_param is None:
+                    raise TypeError(
+                        "contact fine-tune requires the scalar Gaussian action std"
+                    )
+                # Contact success is decided by a millimetre-scale rigid-body
+                # transition which the policy cannot actuate directly.  At
+                # 0.05, stochastic collection walked under load while the
+                # deterministic mean policy stalled after 20--30 mm; worse,
+                # most sampled close/lift phases lost the notebook before any
+                # locomotion sample was collected.  Keep a small non-zero
+                # perturbation for PPO, but make collection representative of
+                # the deterministic policy used by validation and deployment.
+                with torch.no_grad():
+                    std_param.fill_(0.01)
+                std_param.requires_grad_(False)
+                print(
+                    "[five_foot] contact fine-tune fixes action std at 0.01 so "
+                    "exploration does not destroy the physical contact transition"
+                )
+            super().learn(num_learning_iterations, init_at_random_ep_len)
+
+    return FiveFootRunner

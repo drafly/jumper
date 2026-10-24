@@ -71,4 +71,36 @@ def cli_args(group):
         help="start the episode with this prop already in the claw, placed on the "
         "point the claw could actually have closed on. Needs --objects",
     )
-    return ("objects", "hold")
+    group.add_argument(
+        "--grasp-ready-hold",
+        action="store_true",
+        help="hold the carried arm at the contact-validated grasp-ready pose "
+        "instead of the default stow; use for payload fine-tuning and matching export",
+    )
+    group.add_argument(
+        "--payload-kg",
+        type=float,
+        default=None,
+        help="training only: replace the payload curriculum's top range with one "
+        "fixed mass in kilograms",
+    )
+    group.add_argument(
+        "--contact-notebook",
+        action="store_true",
+        help="training only: start every episode closing the real 188 g notebook "
+        "between the jaws; after reset it is held by contact friction alone",
+    )
+    group.add_argument(
+        "--contact-push-box",
+        action="store_true",
+        help="training only: push a free 188 g low-profile box with rigid-body "
+        "contact; no attachment or pose writes after reset",
+    )
+    return (
+        "objects",
+        "hold",
+        "grasp_ready_hold",
+        "payload_kg",
+        "contact_notebook",
+        "contact_push_box",
+    )

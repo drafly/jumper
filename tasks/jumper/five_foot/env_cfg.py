@@ -26,9 +26,11 @@ numbers here if the asset has moved.
 from __future__ import annotations
 
 import math
+from dataclasses import fields
 from pathlib import Path
 
 from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import TerminationTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
@@ -57,6 +59,7 @@ from .claw import (
     HOME_TOE_XY,
     LF_GRASP,
     LF_GRASP_BOX,
+    LF_GRASP_READY,
     OBSERVED_JOINTS,
     PAYLOAD_BODY,
     PAYLOAD_RANGE,
@@ -65,10 +68,25 @@ from .claw import (
     add_payload_body,
     foot_geoms_for,
 )
-from .jaws import JAW_COLLISION, decompose_jaws
+from .jaws import GRIP_GEOMS, JAW_COLLISION, decompose_jaws
+from .mdp.contact_command import (
+    ContactCarryVelocityCommandCfg,
+    ContactPushVelocityCommandCfg,
+)
 from .mdp.curriculum import PayloadCurriculum
 from .mdp.events import claw_payload, hold_carried_arm
-from .mdp.grasp import claw_hold_event
+from .mdp.grasp import (
+    CONTACT_CLOSE_STEPS,
+    CONTACT_RESTART_STEP,
+    claw_hold_event,
+    contact_carry_clearance,
+    contact_grip_event,
+    contact_load_lost,
+    contact_not_lifted,
+    push_claw_event,
+    reset_notebook_grasp,
+    reset_push_box,
+)
 from .mdp.gripper import gripper_teleop_event
 from .mdp.pose_command import BodyPoseCommandCfg, TeleopBodyPoseCommandCfg
 from .mdp.rewards import (
@@ -90,7 +108,8 @@ from .mdp.rewards import (
     stance_duty_balance,
     track_body_pose,
 )
-from .objects import apply_objects
+from .mdp.terminations import illegal_contact_after_grace
+from .objects import apply_objects, apply_training_notebook, apply_training_push_box
 from .rl_cfg import NUM_STEPS_PER_ENV
 
 #: The foot geoms of the five legs that carry the robot.
@@ -283,6 +302,10 @@ def env_cfg(
     play: bool = False,
     objects: bool = False,
     hold: str | None = None,
+    grasp_ready_hold: bool = False,
+    payload_kg: float | None = None,
+    contact_notebook: bool = False,
+    contact_push_box: bool = False,
 ) -> ManagerBasedRlEnvCfg:
     """Build this task's environment config.
 
@@ -293,7 +316,38 @@ def env_cfg(
         objects: `--objects`, the pick-place row in front of the robot
             (`objects.py::apply_objects`).
         hold: `--hold`, a prop the claw starts the episode holding.
+        grasp_ready_hold: hold the arm at the contact-validated grasp-ready pose
+            instead of the default stow.
+        payload_kg: training-only fixed payload mass for the loaded curriculum rung.
+        contact_notebook: training-only physical 188 g notebook held by jaw
+            contact and friction, with no attachment or pose writes after reset.
+        contact_push_box: training-only free 188 g low-profile box pushed by
+            rigid-body contact, with no attachment or pose writes after reset.
     """
+    if payload_kg is not None and payload_kg <= 0:
+        raise ValueError("--payload-kg must be positive")
+    if play and payload_kg is not None:
+        raise ValueError("--payload-kg is training-only; replay validates a real prop")
+    if play and contact_notebook:
+        raise ValueError("--contact-notebook is training-only")
+    if play and contact_push_box:
+        raise ValueError("--contact-push-box is training-only")
+    if contact_notebook and contact_push_box:
+        raise ValueError("choose one contact fixture, not both")
+    if contact_notebook and not grasp_ready_hold:
+        raise ValueError("--contact-notebook requires --grasp-ready-hold")
+    if contact_push_box and not grasp_ready_hold:
+        raise ValueError("--contact-push-box requires --grasp-ready-hold")
+    if contact_notebook and payload_kg is not None:
+        raise ValueError(
+            "--contact-notebook already supplies a real 0.188 kg load; "
+            "do not stack --payload-kg on it"
+        )
+    if contact_push_box and payload_kg is not None:
+        raise ValueError(
+            "--contact-push-box already supplies a real 0.188 kg obstacle; "
+            "do not stack --payload-kg on it"
+        )
     cfg = velocity_env_cfg(
         # This task's own operator controls: the command axes, their signs, the
         # pad -- jumper.posture's layout, the walk on the left stick and the
@@ -477,7 +531,8 @@ def env_cfg(
     # the robot ramps to, and the one its `joint_pos` observation is measured
     # from. `get_jumper_robot_cfg` returns a fresh EntityCfg per call,
     # so this does not reach the other four tasks.
-    robot.init_state.joint_pos = dict(HOME) | dict(LF_GRASP)
+    hold_pose = LF_GRASP_READY if grasp_ready_hold else LF_GRASP
+    robot.init_state.joint_pos = dict(HOME) | dict(hold_pose)
 
     # Re-scope the inherited joint randomiser to the driven joints, so it does not
     # move the arm out from under the hold. (It samples from a zero-width range by
@@ -518,8 +573,17 @@ def env_cfg(
     # note in `common/mdp/observations.py::actuator_force` warns against -- and,
     # now that an operator can close the claw, would train a policy that has never
     # walked with a closed claw and then let one close it.
-    finger_range = (GRIPPER_OPEN, GRIPPER_OPEN) if play else (GRIPPER_OPEN, GRIPPER_CLOSED)
-    hold_ranges = tuple(LF_GRASP_BOX[j] for j in ARM_JOINTS) + (finger_range,)
+    finger_range = (
+        (GRIPPER_OPEN, GRIPPER_OPEN)
+        if play or contact_notebook or contact_push_box
+        else (GRIPPER_OPEN, GRIPPER_CLOSED)
+    )
+    arm_ranges = (
+        tuple((LF_GRASP_READY[j], LF_GRASP_READY[j]) for j in ARM_JOINTS)
+        if grasp_ready_hold
+        else tuple(LF_GRASP_BOX[j] for j in ARM_JOINTS)
+    )
+    hold_ranges = arm_ranges + (finger_range,)
     cfg.events["hold_carried_arm"] = EventTermCfg(
         func=hold_carried_arm,
         mode="reset",
@@ -591,10 +655,15 @@ def env_cfg(
         # terms in insertion order, so a promotion of the commands is seen on the
         # same reset rather than the next.
         assert "command" in cfg.curriculum, "the payload curriculum waits on it"
+        payload_levels = (
+            ((0.0, 0.0), (payload_kg, payload_kg))
+            if payload_kg is not None
+            else PAYLOAD_LEVELS
+        )
         cfg.curriculum["payload"] = CurriculumTermCfg(
             func=PayloadCurriculum,
             params={
-                "levels": PAYLOAD_LEVELS,
+                "levels": payload_levels,
                 "lin_err_bar": PAYLOAD_LIN_ERR_BAR,
                 "dwell_steps": PAYLOAD_DWELL_ITERATIONS * NUM_STEPS_PER_ENV,
             },
@@ -1116,6 +1185,69 @@ def env_cfg(
         params={"minimum_height": MIN_STAND_HEIGHT},
     )
 
+    # A fixed payload names the short CARRY fine-tune, where touching the floor
+    # with anything but a support foot is a failed rollout rather than a posture
+    # we want the policy to trade against tracking. The ordinary task keeps the
+    # graded reward above: it must recover from incidental contact while learning
+    # from scratch. In the 188 g grasp-ready resume on 2026-10-06 (native CPU,
+    # 500 iterations), `ground_contact` worsened from approximately zero to a
+    # -0.596 mean over the final 50 logged episodes while mean return reached 127
+    # and both `too_low` and `fell_over` stayed at zero. The -0.5 reward therefore
+    # observed the CARRY failure but did not make it episode-defining. Reuse the
+    # same sensor and 1 N threshold here so reward and termination cannot disagree
+    # about what touched the ground.
+    if payload_kg is not None or contact_notebook or contact_push_box:
+        cfg.terminations["non_foot_ground_contact"] = TerminationTermCfg(
+            func=illegal_contact_after_grace,
+            params={
+                "sensor_name": GROUND_CONTACT_SENSOR,
+                "force_threshold": GROUND_CONTACT_FORCE_THRESHOLD,
+                # Give the fine-tune two seconds of loaded locomotion in which
+                # the strong graded penalty below can teach recovery.  Replay
+                # validation still rejects the first >1 N non-foot contact.
+                "grace_steps": (
+                    CONTACT_RESTART_STEP + 100
+                    if contact_notebook
+                    else 150 if contact_push_box else 50
+                ),
+            },
+        )
+    if contact_notebook:
+        twist = cfg.commands["twist"]
+        cfg.commands["twist"] = ContactCarryVelocityCommandCfg(
+            **{field.name: getattr(twist, field.name) for field in fields(type(twist))},
+            restart_step=CONTACT_RESTART_STEP,
+            carry_speed=0.25,
+        )
+        # Validation holds a neutral body command while the operator closes and
+        # lifts.  Random pushes and sampled attitude targets during those phases
+        # created transitions that the policy can never see in that workflow.
+        cfg.events.pop("push_robot", None)
+        cfg.terminations["contact_load_lost"] = TerminationTermCfg(
+            func=contact_load_lost,
+            params={
+                "prop": "notebook",
+                "grace_steps": CONTACT_CLOSE_STEPS,
+                "max_distance_m": 0.075,
+            },
+        )
+        cfg.terminations["contact_not_lifted"] = TerminationTermCfg(
+            func=contact_not_lifted,
+            params={
+                "prop": "notebook",
+                "grace_steps": CONTACT_RESTART_STEP,
+                "minimum_clearance_m": 0.002,
+            },
+        )
+    if contact_push_box:
+        twist = cfg.commands["twist"]
+        cfg.commands["twist"] = ContactPushVelocityCommandCfg(
+            **{field.name: getattr(twist, field.name) for field in fields(type(twist))},
+            carry_speed=0.25,
+            start_pulse_speed=0.35,
+        )
+        cfg.events.pop("push_robot", None)
+
     # ── 8. In replay, the operator drives the claw ────────────────────────
     # `claw_left` closes it as far as it is held -- `LT` on the pad, Space on the
     # keyboard -- because `controls.yaml` declares it for the claw. Replay-only, exactly like the operator's walk and for the same two
@@ -1154,6 +1286,8 @@ def env_cfg(
     # level can only reach what is already at its own height and angle; aiming is
     # done by leaning, and until now nothing ever asked this robot to lean.
     cfg.commands[POSE_COMMAND] = BodyPoseCommandCfg(resampling_time_range=(5.0, 5.0))
+    if contact_notebook or contact_push_box:
+        cfg.commands[POSE_COMMAND].rel_neutral_envs = 1.0
 
     # Observed by the actor **and** the critic, and it has to be both: a command
     # the policy cannot see is noise it is punished for not obeying. The actor's
@@ -1472,6 +1606,87 @@ def env_cfg(
         apply_objects(cfg)
     if hold is not None:
         _start_holding(cfg, hold)
+    if contact_notebook:
+        apply_training_notebook(cfg)
+        # Added after the robot and arm reset terms: the seat is measured from
+        # their reset pose. Only this reset writes the prop pose; the step event
+        # drives the real finger actuator and never touches the prop.
+        cfg.events["reset_contact_notebook"] = EventTermCfg(
+            func=reset_notebook_grasp,
+            mode="reset",
+            params={
+                "prop": "notebook",
+                "center_offset_m": (0.0125, 0.0, 0.0),
+                # Stage one deliberately matches the fixed-centre acceptance
+                # test.  Position/orientation tolerance is restored only after
+                # the loaded restart passes across startup-DR seeds.
+                "offset_half_range_m": (0.0, 0.0, 0.0),
+                "pitch_range_rad": (0.0, 0.0),
+            },
+        )
+        cfg.events["maintain_contact_grip"] = contact_grip_event()
+        # Per-environment startup randomization spans painted-floor and rubber
+        # grip variation without turning friction into an unphysical rescue.
+        # The nominal values remain the measured 0.35 for the notebook and 1.0 /
+        # 0.005 for the jaw's sliding/torsional friction. The notebook range also
+        # changes its floor contact; the equal-priority jaw wins by max() in the
+        # pinch, so the two jaw terms are what vary the actual grip.
+        cfg.events["contact_notebook_friction"] = EventTermCfg(
+            func=dr.geom_friction,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("notebook"),
+                "operation": "abs",
+                "ranges": (0.35, 0.35),
+                "axes": [0],
+                "shared_random": True,
+            },
+        )
+        cfg.events["contact_jaw_slide_friction"] = EventTermCfg(
+            func=dr.geom_friction,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", geom_names=GRIP_GEOMS),
+                "operation": "abs",
+                "ranges": (1.0, 1.0),
+                "axes": [0],
+                "shared_random": True,
+            },
+        )
+        cfg.events["contact_jaw_torsion_friction"] = EventTermCfg(
+            func=dr.geom_friction,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", geom_names=GRIP_GEOMS),
+                "operation": "abs",
+                "ranges": (0.005, 0.005),
+                "axes": [1],
+                "shared_random": True,
+            },
+        )
+        cfg.rewards["contact_carry_clearance"] = RewardTermCfg(
+            func=contact_carry_clearance,
+            weight=2.0,
+            params={
+                "prop": "notebook",
+                "grace_steps": CONTACT_RESTART_STEP - 25,
+                "target_clearance_m": 0.015,
+            },
+        )
+        cfg.rewards["ground_contact"].weight = -5.0
+        # The free body above is the load. Keep the synthetic payload body at its
+        # startup zero mass and do not stack invisible curriculum mass onto it.
+        cfg.curriculum.pop("payload", None)
+    if contact_push_box:
+        apply_training_push_box(cfg)
+        cfg.events["reset_contact_push_box"] = EventTermCfg(
+            func=reset_push_box,
+            mode="reset",
+            params={"prop": "push_box", "gap_m": 0.0},
+        )
+        cfg.events["maintain_push_claw"] = push_claw_event()
+        # The free box is the contact load; do not add invisible payload mass.
+        cfg.curriculum.pop("payload", None)
 
     # The dToF, which the model carries (`common/tof.py`). Replay only, where the
     # live viewer shows it in the window's corner; nothing in training reads it,

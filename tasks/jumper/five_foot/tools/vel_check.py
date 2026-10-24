@@ -42,6 +42,7 @@ CMDS = (
     ("stand",        (0.0, 0.0, 0.0)),
     ("fwd 0.25",     (0.25, 0.0, 0.0)),
     ("fwd 0.50",     (0.5, 0.0, 0.0)),
+    ("back 0.25",    (-0.25, 0.0, 0.0)),
     ("back 0.30",    (-0.3, 0.0, 0.0)),
     ("left 0.25",    (0.0, 0.25, 0.0)),
     ("turn 0.50",    (0.0, 0.0, 0.5)),
@@ -56,14 +57,23 @@ def main() -> int:
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--num_envs", type=int, default=32)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--backend", choices=("warp", "native"), default="warp")
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--only", action="append", choices=tuple(name for name, _ in CMDS),
+                    help="measure only this command (repeat for more than one)")
+    ap.add_argument("--grasp-ready-payload-kg", type=float, default=None,
+                    help="diagnostic training configuration with a grasp-ready arm "
+                         "and equivalent rigid payload; not a contact-grasp result")
     args = ap.parse_args()
+    if args.grasp_ready_payload_kg is not None and args.grasp_ready_payload_kg <= 0:
+        ap.error("--grasp-ready-payload-kg must be positive")
     warnings.filterwarnings("ignore")
     import torch
     from mjrl.backend.resolve import resolve
     from mjrl.backend.select import use_backend
 
     import tasks
-    res = resolve(backend="warp", device="cuda", num_envs=args.num_envs)
+    res = resolve(backend=args.backend, device=args.device, num_envs=args.num_envs)
     use_backend(res)
     from dataclasses import asdict
 
@@ -71,7 +81,17 @@ def main() -> int:
     from mjlab.rl import RslRlVecEnvWrapper
     from mjlab.rl.runner import MjlabOnPolicyRunner
 
-    cfg = tasks.load_env_cfg("jumper.five_foot", play=True)
+    loaded = args.grasp_ready_payload_kg is not None
+    task_args = (
+        {"grasp_ready_hold": True, "payload_kg": args.grasp_ready_payload_kg}
+        if loaded else None
+    )
+    cfg = tasks.load_env_cfg("jumper.five_foot", play=not loaded, task_args=task_args)
+    if loaded:
+        # A velocity ruler must not include the training-only random shove.  Keep
+        # startup domain randomisation: cross-seed sensitivity is what this
+        # diagnostic is intended to expose.
+        cfg.events.pop("push_robot", None)
     cfg.scene.num_envs = args.num_envs
     cfg.seed = args.seed
     tw = cfg.commands["twist"]
@@ -96,7 +116,8 @@ def main() -> int:
     print(f"{'command':<10} | {'vx cmd/act':>16} | {'wz cmd/act':>16} | "
           f"{'|v_xy| err':>10} | {'wz err':>8}")
     rows = []
-    for name, (vx, vy, wz) in CMDS:
+    commands = [item for item in CMDS if args.only is None or item[0] in args.only]
+    for name, (vx, vy, wz) in commands:
         cmd.cfg.ranges.lin_vel_x = (vx, vx)
         cmd.cfg.ranges.lin_vel_y = (vy, vy)
         cmd.cfg.ranges.ang_vel_z = (wz, wz)
@@ -117,7 +138,8 @@ def main() -> int:
               f"{wz:+6.2f} / {float(A.mean()):+6.2f} | {lin_err:10.3f} | {ang_err:8.3f}")
         rows.append((name, lin_err, ang_err))
     walk = [r for r in rows if r[0] != "stand"]
-    print(f"\nmean over the 9 moving commands: |v_xy| err {sum(r[1] for r in walk)/len(walk):.3f} m/s, "
+    print(f"\nmean over the {len(walk)} moving commands: |v_xy| err "
+          f"{sum(r[1] for r in walk)/len(walk):.3f} m/s, "
           f"wz err {sum(r[2] for r in walk)/len(walk):.3f} rad/s")
     env.close()
     return 0
