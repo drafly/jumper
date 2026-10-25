@@ -135,3 +135,19 @@
 - 成功试次道具平面位移 83--92 mm，倾斜 0--5.8°，撤离 53--95 mm；8 次均无摔倒、无非足触地。唯一失败为 seed 0 第一次复位：底盘没有建立持续接触，道具仅移动约 1 mm。固定预退让和带重试的候选会造成额外扫碰，已拒绝，不计入主结果。
 - 当前结论：刚体推送已经跨 seed 证明可行，明显优于真实夹持搬运，但 87.5% 仍不足以称为可靠部署。故事流程可以采用“接近—停稳—闭爪形成推面—低速推开—抬爪—撤离”，并保留接触建立超时；正式接近定位和更大初始位姿网格应在消除 seed 0 冷启动失败后再做。
 - 成功视频：`push_box_87198_seed1_80mm.mp4`（MuJoCo H.264）；对应单次 JSON 为 `push_box_87198_seed1_video.json`，四 seed 主结果为 `push_box_87198_seed{0,1,2,42}_trials2_80mm.json`。
+
+## 推送验证器命令生命周期修复与新基线（2026-10-25）
+
+- 诊断（独立 reset 对照 + 逐控制步 NPZ，见 `out/diag/`）证明上述 7/8 中的唯一失败**不是策略的 seed 0 冷启动缺陷**，而是验证器协议缺陷：play 配置的 twist 命令项未钉 `resampling_time_range`（默认 3–8 s），而 `_place_the_robot` 把 `rel_standing_envs` 钉为 1.0；命令管理器在计时到期时重采样并把环境置回 standing，`_update_command` 从当步起把验证器写入的 `vel_command_b` 清零。实测（Apple M4、macOS 26.3、native:cpu）：reset 时 `time_left=4.90 s`，push 开始时仅剩 0.02 s，push 第 1 步重采样、命令清零并持续整段 push（400 步满超时）；seed 0 第 5 次 trial 的 backoff 失败是同一机制落在 backoff 阶段（命令第 3 步清零，只退 19 mm）。命令存活过 push 第 1 步的 13/13 次试验全部成功。
+- 修复：`push_objects.py` 与诊断孪生工具 `push_diagnose.py` 在环境构造前把 twist 项 `resampling_time_range` 钉为 `(1e6, 1e6)`，与 `vel_check.py`/`twist_check.py`/`gait_check.py` 一致。回归探针（仓库外一次性脚本）：push 与 backoff 命令各持续 240 控制步（12 s，越过旧 3 s 与 8 s 边界）0 步被覆盖、0 步被随机置回 standing，命令归零仅来自显式 `command(0.0)`。
+- 新正式基线（同一 checkpoint、物理参数、门槛与 trial reset 方式）：seed 0/1/2/42 × 5 次独立 reset、80 mm 固定中心点 **20/20 成功**，摔倒 0、非足触地 0。逐次 JSON：`push_box_87198_seed{0,1,2,42}_trials5_80mm_fixed.json`；视频：`push_box_87198_seed0_trials5_80mm_fixed.mp4`。诊断孪生的逐控制步记录在 `out/diag_fixed/`：20/20 的 push 命令在整个 push 阶段全程有效、backoff 命令在整个 backoff 阶段全程有效。
+- 结论修订：**没有证据表明 model_87198.pt 存在 seed 0 特有的冷启动缺陷**。历史 7/8 与 `push_box_87198_seed{0,1,2,42}_trials2_80mm.json`、`out/diag/` 旧记录仍保留为验证器问题的证据，不删除、不覆盖，但不再用于评价策略的 seed 鲁棒性；修复后的 20/20 是新的正式基线，作为进入 100 mm 距离验证的依据。
+
+## 100 mm 固定中心点验证（2026-10-25）
+
+- 与 80 mm 新基线完全相同的协议（checkpoint `model_87198.pt`、push_box 120 × 100 × 70 mm 0.188 kg、seed 0/1/2/42 × 5 次独立 reset、0.35 m/s、零初始间隙、肩偏置 +0.15 rad、撤离 −0.35/−0.15 m/s、twist 项 `resampling_time_range=(1e6,1e6)` 在环境构造前设置），唯一改动 `--distance-m 0.08 → 0.10`。
+- **20/20 成功**，摔倒 0、非足触地 0。逐 seed 位移（mm）：seed 0 = 112/112/112/113/109；seed 1 = 109/108/109/108/111；seed 2 = 106/112/105/107/107；seed 42 = 103/119/108/109/117。横向偏移 7–51 mm（门槛 100 mm）、最大倾角 0.3°、撤离 49–96 mm（门槛 45 mm）、撤离期间道具拖动全部 ≤10 mm（逐次 JSON 内）。
+- 逐控制步诊断（`out/diag_fixed_100mm/`）：20/20 的 push 命令在整段 push 全程有效（30–389 步）、backoff 命令在整段 backoff 全程有效（12–15 步）；最长持续接触 16–386 帧。
+- 机器：Apple M4、macOS 26.3、Python 3.11.15、MuJoCo 3.11.0、native:cpu。
+- 逐次 JSON：`push_box_87198_seed{0,1,2,42}_trials5_100mm_fixed.json`；完整视频：`push_box_87198_seed0_trials5_100mm_fixed.mp4`。
+- 结论：100 mm 固定中心点已跨 seed 通过（20/20、每 seed 5/5）。按 HANDOFF §7.1，下一步以同一参数只改 `--distance-m 0.12` 验证 120 mm。

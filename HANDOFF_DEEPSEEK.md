@@ -60,8 +60,9 @@ python3 .claude/skills/setup-env/scripts/detect.py
 - 成功试次推送 82.7–92.0 mm，最大倾斜 5.8°，撤离 53–95 mm；8 次均无摔倒、无非足触地。
 - 唯一失败：seed 0 第一次复位未建立持续接触，仅推约 0.974 mm，失败码 `push_distance`。
 - 固定预退让和自动重试会产生额外扫碰，已拒绝，不应恢复成默认方案。
+- **2026-10-25 诊断结论**：上述 7/8 的失败来自验证器命令随机重采样（play 配置 twist 项 `resampling_time_range` 未钉、默认 3–8 s，`rel_standing_envs=1.0`，计时到期即把验证器写入的 push 命令清零），**不是策略的 seed 0 冷启动缺陷**；命令存活过 push 第 1 步的 13/13 次试验全部成功。修复后（`push_objects.py` 在环境构造前钉 `(1e6, 1e6)`）同参数 seed 0/1/2/42 × 5 次独立 reset、80 mm 为 **20/20 成功**，摔倒 0、非足触地 0——这是新的正式基线。历史 7/8 及其 JSON/视频仍保留为问题证据，不删除、不覆盖，但不再用于评价策略的 seed 鲁棒性。详见 `tasks/jumper/five_foot/out/grasp_validation_summary.md` 2026-10-25 一节。
 
-当前结论不是“已可靠部署”，而是“推送明显优于抓取且跨 seed 可行”。下一步先消除 seed 0 冷启动失败，再扩展 100–150 mm 长距离，最后才做 3×3×3 初始位姿网格和自主接近。
+当前结论不是“已可靠部署”，而是“推送明显优于抓取且跨 seed 可行”。下一步扩展 100–150 mm 长距离，最后才做 3×3×3 初始位姿网格和自主接近。
 
 ## 2. 必须迁移的内容
 
@@ -346,7 +347,11 @@ macOS 图形窗口必须使用 `mjpython`：
 
 普通 `python` 可用于 headless 训练、测试和视频生成。首轮 Warp kernel 编译耗时数分钟属于正常现象。
 
-## 6. 复现当前 7/8 结果
+## 6. 复现当前结果
+
+> 2026-10-25 修订：旧基线 7/8 中的唯一失败已诊断为验证器命令随机重采样（见上文“已经成立的证据”），
+> 验证器已修复。直接用下面第 6.1 节的 20 次命令重新建立基线；历史 `_trials2_80mm` JSON 与视频保留为
+> 问题证据，不删除、不覆盖。旧 7/8 数字不再用于评价策略的 seed 鲁棒性。
 
 先运行静态与单元测试：
 
@@ -379,31 +384,32 @@ git diff --check
 
 旧电脑最后一次结果为前一组 134 tests + `test_layout.py` 15 tests 全部通过，合计 149；新电脑应达到同样结果。
 
-然后对四个 seed 各做两次 80 mm 复测。逐条执行，以便任何失败都保留对应 JSON：
+然后对四个 seed 各做五次 80 mm 复测。逐条执行，以便任何失败都保留对应 JSON：
 
 ```bash
 python tasks/jumper/five_foot/tools/push_objects.py \
   --checkpoint logs/jumper/jumper.five_foot/2026-10-21_22-52-37/model_87198.pt \
-  --object push_box --orientation upright --trials 2 --seed 0 \
+  --object push_box --orientation upright --trials 5 --seed 0 \
   --distance-m 0.08 --speed 0.35 --initial-gap-mm 0 \
   --shoulder-offset-rad 0.15 --backoff-m 0.05 \
   --backoff-lateral-speed -0.15 \
-  --json tasks/jumper/five_foot/out/push_box_87198_seed0_trials2_80mm_recheck.json
+  --json tasks/jumper/five_foot/out/push_box_87198_seed0_trials5_80mm_fixed.json
 ```
 
-把 `--seed 0` 和输出文件名依次改成 `1`、`2`、`42`。这个验证器在失败时以非零状态退出，但仍会写 JSON；不要因一次失败而丢弃记录或自动重试。
+把 `--seed 0` 和输出文件名依次改成 `1`、`2`、`42`。这个验证器在失败时以非零状态退出，但仍会写 JSON；不要因一次失败而丢弃记录或自动重试。逐控制步诊断记录用 `push_diagnose.py`（同一参数，`--out` 指向独立目录）生成，供命令有效步数、首次接触和持续接触帧核对。
 
 生成可观看视频：
 
 ```bash
 python tasks/jumper/five_foot/tools/push_objects.py \
   --checkpoint logs/jumper/jumper.five_foot/2026-10-21_22-52-37/model_87198.pt \
-  --object push_box --orientation upright --trials 1 --seed 1 \
+  --object push_box --orientation upright --trials 5 --seed 0 \
   --distance-m 0.08 --speed 0.35 --initial-gap-mm 0 \
   --shoulder-offset-rad 0.15 --backoff-m 0.05 \
   --backoff-lateral-speed -0.15 \
-  --json tasks/jumper/five_foot/out/push_box_87198_seed1_video_recheck.json \
-  --video tasks/jumper/five_foot/out/push_box_87198_seed1_80mm_recheck.mp4
+  --json tasks/jumper/five_foot/out/push_box_87198_seed0_trials5_80mm_fixed.json \
+  --video tasks/jumper/five_foot/out/push_box_87198_seed0_trials5_80mm_fixed.mp4 \
+  --video-trial 1
 ```
 
 视频验证同样是 native MuJoCo 中的物理回放，不是录制动画，也不代表已实现视觉定位或自主接近。
@@ -436,13 +442,12 @@ NVIDIA 机器可省略 `--backend native --device cpu`，让解析器选 `warp:c
 
 ### 7.1 优化顺序
 
-1. 用 `model_87198.pt` 重新得到固定中心点基线，不要先改验证器门槛。
-2. 针对 seed 0 冷启动，记录 reset 后 50 步内的底盘相位、推面到道具的距离、首次接触时间和连续接触帧；先证明失败来自接触建立，而非随机化、姿态或错误 reset。
-3. 优先通过训练分布解决冷启动，不采用验证时瞬移、吸附、外力、焊接或隐藏重试。
-4. 候选 checkpoint 先跑 seed 0/1/2/42 × 5 次固定中心点 80 mm。建议晋级门槛：总计至少 19/20、每个 seed 至少 4/5、摔倒 0、非足触地 0、无主动掩盖失败的 retry。
-5. 固定中心点通过后，将同一参数只改 `--distance-m 0.10`，再测试 100 mm；稳定后测试 120 mm，最后才尝试 150 mm。每个距离都重新检查停止、倾斜、撤离和道具回拖。
-6. 长距离固定中心点跨 seed 通过后，给验证器增加显式 X/Y/yaw 初始偏置参数，执行 3×3×3 网格。不能用 reset 后的持续位姿写入夹具修正误差。
-7. 网格通过后再接入接近与定位；在此之前结果只应称为“已知位姿固定点接触推送”。
+1. ✅ 已完成：用 `model_87198.pt` 重新得到固定中心点基线（未改验证器门槛）。
+2. ✅ 已完成：seed 0 失败诊断为验证器命令随机重采样，而非接触建立、随机化、姿态或 reset 问题；逐控制步证据在 `tasks/jumper/five_foot/out/diag/`。未采用任何验证时瞬移、吸附、外力、焊接或隐藏重试；训练分布无需为此改动。
+3. ✅ 已完成：修复验证器命令生命周期后，`model_87198.pt` 在 seed 0/1/2/42 × 5 次固定中心点 80 mm 为 20/20 成功，摔倒 0、非足触地 0、无 retry——达到原晋级门槛（19/20、每 seed 4/5）。新基线 JSON 为 `push_box_87198_seed{0,1,2,42}_trials5_80mm_fixed.json`。
+4. ✅ 已完成：100 mm 固定中心点（仅 `--distance-m 0.10`，其余参数与 80 mm 基线完全一致）为 20/20 成功、摔倒 0、非足触地 0；JSON 为 `push_box_87198_seed{0,1,2,42}_trials5_100mm_fixed.json`，视频 `push_box_87198_seed0_trials5_100mm_fixed.mp4`。下一步以同一参数只改 `--distance-m 0.12` 测试 120 mm，稳定后再试 150 mm；每个距离都重新检查停止、倾斜、撤离和道具回拖。
+5. 长距离固定中心点跨 seed 通过后，给验证器增加显式 X/Y/yaw 初始偏置参数，执行 3×3×3 网格。不能用 reset 后的持续位姿写入夹具修正误差。
+6. 网格通过后再接入接近与定位；在此之前结果只应称为“已知位姿固定点接触推送”。
 
 ### 7.2 必须保留的安全守卫
 
@@ -501,9 +506,9 @@ git merge-base 7d3cc4bebd1efe951e0adc38c053d417260867c0 HEAD、git status --shor
 7d3cc4bebd1efe951e0adc38c053d417260867c0，刚克隆的工作树应干净。禁止 reset、
 clean、覆盖已有成果或顺手整理无关文件。
 
-主路线已经从不可靠夹取切换为自由刚体推送。只允许 MuJoCo 碰撞与摩擦移动 120×100×70 mm、0.188 kg 的 push_box；不得使用吸附、weld、跟随、外力、接触后瞬移或隐藏重试。现有 model_87198.pt 在 seed 0/1/2/42 各 2 次、80 mm 固定中心点测试中为 7/8，唯一失败是 seed 0 首次 reset 未建立持续接触。先复现基线和失败，再诊断并通过训练改善 seed 0 冷启动。
+主路线已经从不可靠夹取切换为自由刚体推送。只允许 MuJoCo 碰撞与摩擦移动 120×100×70 mm、0.188 kg 的 push_box；不得使用吸附、weld、跟随、外力、接触后瞬移或隐藏重试。model_87198.pt 在 seed 0/1/2/42 各 2 次、80 mm 固定中心点的历史结果 7/8 中的唯一失败已诊断为验证器命令随机重采样（twist 项 `resampling_time_range` 未钉），不是策略缺陷；验证器修复后四 seed × 5 次为 20/20 成功，是新的正式基线。历史 JSON/视频保留为问题证据，不删除、不覆盖。
 
-不要马上运行 3×3×3 网格。先使固定中心点在 seed 0/1/2/42 × 5 次中至少 19/20、每 seed 至少 4/5，且摔倒与非足触地均为 0；然后依次验证 100、120、150 mm。每次报告 checkpoint、训练参数、物品尺寸/质量、MuJoCo 参数、每 trial JSON、成功率、滑移/倾斜/停止/撤离、摔倒和失败原因，并生成至少一个完整 MuJoCo MP4。
+不要马上运行 3×3×3 网格。固定中心点 80 mm 已在修复后的验证器上达到 20/20（每 seed 5/5）、摔倒与非足触地均为 0；接下来依次验证 100、120、150 mm。每次报告 checkpoint、训练参数、物品尺寸/质量、MuJoCo 参数、每 trial JSON、成功率、滑移/倾斜/停止/撤离、摔倒和失败原因，并生成至少一个完整 MuJoCo MP4。
 
 开始时只做读取、环境检查和基线复现；给出证据后再做最小代码修改。编辑遵守 CLAUDE.md，使用 apply_patch，保留所有失败记录，完成后运行相关 Ruff、pytest 和 git diff --check。
 ```

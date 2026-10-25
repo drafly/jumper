@@ -156,6 +156,18 @@ def main() -> int:
     cfg = tasks.load_env_cfg(args.task, play=True, task_args={"objects": True})
     cfg.seed = args.seed
     cfg.scene.num_envs = 1
+    # Pin the twist term's resampling window for the whole run.  The validator
+    # writes commands directly, and with the play-config default (3.0, 8.0) s
+    # the command manager re-rolls time_left at the first expiry: because
+    # _place_the_robot pins rel_standing_envs = 1.0, the resample flips
+    # is_standing_env True and zeroes vel_command_b on every step after
+    # (velocity_command.py _update_command), silently cancelling the push or
+    # backoff command mid-phase.  Measured before this pin (Apple M4, macOS 26.3,
+    # native:cpu): time_left 4.90 s at reset -> 0.02 s at push start -> resample
+    # on push step 1 -> command zero for the remaining 399 steps; 13/13 trials
+    # whose command survived push step 1 pushed successfully.  The other
+    # five_foot check tools (vel_check, twist_check, gait_check) pin the same.
+    cfg.commands["twist"].resampling_time_range = (1e6, 1e6)
     push_box = PUSH_BOX
     if args.object == "push_box":
         # Validation-only free rigid body.  Keeping it out of SOLIDS avoids
