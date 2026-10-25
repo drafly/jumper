@@ -1,4 +1,4 @@
-<!-- tracks: PROJECT_GUIDE.md @ sha256:f31ae2b351ea20cc -->
+<!-- tracks: PROJECT_GUIDE.md @ sha256:736b8a50940820ab -->
 
 # Jumper 项目指南
 
@@ -42,6 +42,13 @@ PyTorch 或 vendored package 是否装错的方法。[教程](TUTORIAL.zh.md)会
 带到 bundle。
 
 ## 接下来去哪里
+
+### 你想构建完整体验
+
+| | |
+|---|---|
+| [端到端体验工作流](EXPERIENCE_WORKFLOW.zh.md) | 将外观、场景、动作、物理交互、控制、打包和证据作为一套带门禁的流程进行规划。 |
+| [Train 与 Design 工作流](WORKFLOWS.md) | 将每个阶段分派到正确仓库，并遵守集成边界。 |
 
 ### 你想训练一个策略
 

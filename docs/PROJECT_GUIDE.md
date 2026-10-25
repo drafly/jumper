@@ -43,6 +43,13 @@ checks that catch an incorrect Python, PyTorch or vendored-package installation.
 
 ## Where to go next
 
+### You want to build a complete experience
+
+| | |
+|---|---|
+| [End-to-end experience workflow](EXPERIENCE_WORKFLOW.md) | Plan appearance, scene, motions, physical interaction, controls, packaging and evidence as one gated workflow. |
+| [Train and Design workflows](WORKFLOWS.md) | Route each stage to the correct repository and respect the integration boundaries. |
+
 ### You want to train a policy
 
 | | |

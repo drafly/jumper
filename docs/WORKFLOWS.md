@@ -5,6 +5,10 @@ separate public repository, not a directory that this checkout is expected to co
 coding assistant to read the current Design rules remotely before deciding
 whether a Design checkout is needed:
 
+For a project that combines appearance, scene, motions, physical interaction, controls and
+deployment, start with the [end-to-end experience workflow](EXPERIENCE_WORKFLOW.md), then return
+here to route each stage to its owning repository.
+
 - [Design AGENTS.md](https://github.com/KingKongRobotics/jumper-design/blob/main/AGENTS.md)
 - [Design workflow](https://github.com/KingKongRobotics/jumper-design/blob/main/docs/workflow.md)
 - [Design content-package protocol](https://github.com/KingKongRobotics/jumper-design/blob/main/docs/content-packages.md)
