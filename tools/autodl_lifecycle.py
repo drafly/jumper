@@ -1614,8 +1614,16 @@ def format_available(rows: list[dict]) -> str:
 
 
 def market_check(config: LifecycleConfig, *, gpus: tuple[str, ...],
-                 min_idle: int, notify: bool) -> int:
-    """Read-only check of what the create page would actually rent."""
+                 min_idle: int, notify: bool, force: bool = False) -> int:
+    """Read-only check of what the create page would actually rent.
+
+    With no queued task this returns immediately: standard monitoring is also
+    task-driven, so an idle account is not woken up every hour. `--force` is for
+    a manual look.
+    """
+    if read_pending_task() is None and not force:
+        print("no pending training task; standard monitoring skipped")
+        return 0
     allowed = gpus or STANDARD_GPUS
     found = standard_available(config, allowed)
     available = [row for row in found if row["machines"]]
@@ -2067,6 +2075,8 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("--gpu", help="comma-separated GPU types")
     check.add_argument("--min-idle", type=int, default=1)
     check.add_argument("--no-notify", action="store_true")
+    check.add_argument("--force", action="store_true",
+                       help="run even when no training task is queued")
     auth = sub.add_parser(
         "browser-auth",
         help="open a browser, wait for a human AutoDL login, and keep the session",
@@ -2136,7 +2146,7 @@ def main(argv: list[str] | None = None) -> int:
             gpus = tuple(part.strip() for part in (args.gpu or "").split(",")
                          if part.strip())
             return market_check(config, gpus=gpus, min_idle=args.min_idle,
-                                notify=not args.no_notify)
+                                notify=not args.no_notify, force=args.force)
         if args.command == "queue-task":
             path = queue_task(args.task, max_hours=args.max_hours,
                               num_envs=args.num_envs,
@@ -2156,7 +2166,7 @@ def main(argv: list[str] | None = None) -> int:
             gpus = tuple(part.strip() for part in (args.gpu or "").split(",")
                          if part.strip())
             return market_check(config, gpus=gpus, min_idle=args.min_idle,
-                                notify=not args.no_notify)
+                                notify=not args.no_notify, force=args.force)
         if args.command == "queue-task":
             path = queue_task(args.task, max_hours=args.max_hours,
                               num_envs=args.num_envs,

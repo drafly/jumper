@@ -592,10 +592,20 @@ def test_market_check_records_the_signature(tmp_path, monkeypatch, capsys) -> No
                             "price": "¥0.93"}], "total": 1}]
     monkeypatch.setattr(lifecycle, "standard_available", lambda cfg, gpus: rows)
     assert lifecycle.market_check(config, gpus=("RTX 3080", "RTX 3080 Ti"),
-                                  min_idle=1, notify=False) == 0
+                                  min_idle=1, notify=False, force=True) == 0
     state = json.loads((config.log_dir / "market-state.json").read_text())
     assert "3080a" in state["signature"]
     assert "RTX 3080" in capsys.readouterr().out
+
+
+def test_market_check_skips_when_no_task_is_queued(tmp_path, monkeypatch, capsys) -> None:
+    config = _config(tmp_path, backend="pro")
+    monkeypatch.setattr(lifecycle, "PENDING_TASK", tmp_path / "pending.json")
+    monkeypatch.setattr(lifecycle, "standard_available",
+                        lambda *a, **k: pytest.fail("no task must mean no page scan"))
+    assert lifecycle.market_check(config, gpus=("RTX 3080 Ti",), min_idle=1,
+                                  notify=False) == 0
+    assert "monitoring skipped" in capsys.readouterr().out
 
 
 def test_pro_worker_does_nothing_without_a_pending_task(tmp_path, monkeypatch,
