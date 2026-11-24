@@ -43,6 +43,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -343,6 +344,11 @@ def _api_headers(config: ApiConfig) -> dict:
     return headers
 
 
+def _pro_get_url(path: str, **params: object) -> str:
+    """The Pro API's GET endpoints take query parameters, not a JSON body."""
+    return _pro_url(path) + "?" + urllib.parse.urlencode({k: str(v) for k, v in params.items()})
+
+
 def _pro_url(path: str) -> str:
     return f"{PRO_BASE}/api/v1/dev/instance/pro/{path}"
 
@@ -355,7 +361,7 @@ def api_status(config: ApiConfig, transport=_request) -> str:
     """The instance's status: running / shutdown / creating / abnormal / unknown."""
     if config.backend == "pro":
         payload = _expect_success(transport(
-            _pro_url("status"), {"instance_uuid": config.instance_uuid},
+            _pro_get_url("status", instance_uuid=config.instance_uuid), None,
             _api_headers(config), method="GET",
         ), "instance status")
         return str(payload.get("data") or "unknown").lower()
@@ -447,7 +453,7 @@ def api_pro_list(config: ApiConfig, transport=_request) -> list[dict]:
 
 def api_pro_snapshot(config: ApiConfig, instance_uuid: str, transport=_request) -> dict:
     payload = _expect_success(
-        transport(_pro_url("snapshot"), {"instance_uuid": instance_uuid},
+        transport(_pro_get_url("snapshot", instance_uuid=instance_uuid), None,
                   _api_headers(config), method="GET"),
         "instance snapshot",
     )
@@ -1440,10 +1446,7 @@ def adopt_instance(config: LifecycleConfig, *, task: str, max_hours: float | Non
     python = _detect_python(config, session_config)
     session_config = _pro_session_config(config, snapshot, python)
     print(f"python on the box: {python}")
-    check = _remote_train_cmd(session_config, "check")
-    print(check.stdout.strip()[-1500:])
-    if check.returncode != 0:
-        raise LifecycleError("remote_train.py check failed; the instance is left running")
+    _ensure_tmux(session_config)
     sync = _remote_train_cmd(session_config, "sync")
     print(sync.stdout.strip()[-600:])
     if sync.returncode != 0:
@@ -1458,6 +1461,10 @@ def adopt_instance(config: LifecycleConfig, *, task: str, max_hours: float | Non
     print(boot.stdout.strip()[-1200:])
     if boot.returncode != 0:
         raise LifecycleError("bootstrap failed; the instance is left running")
+    check = _remote_train_cmd(session_config, "check")
+    print(check.stdout.strip()[-1500:])
+    if check.returncode != 0:
+        raise LifecycleError("remote_train.py check failed; the instance is left running")
     submit = ["submit", "--task", task, "--release", release,
               "--num-envs", "64", "--max-iterations", "20",
               "--max-hours", str(max_hours if max_hours is not None else 0.5)]
@@ -1660,6 +1667,20 @@ mujoco_gl = "disabled"
     return path
 
 
+def _ensure_tmux(session_config: Path) -> None:
+    """A fresh Pro image has no tmux; `submit` needs it for the background job."""
+    module = _remote_train()
+    remote = module.Remote(module.load_config(str(session_config)))
+    if remote.run("command -v tmux", check=False).stdout.strip():
+        return
+    print("installing tmux on the box (apt-get)")
+    proc = remote.run("apt-get update -y >/dev/null 2>&1 && apt-get install -y tmux",
+                      timeout=600, check=False)
+    print(proc.stdout[-400:])
+    if proc.returncode != 0:
+        raise LifecycleError("could not install tmux on the box")
+
+
 def _install_pubkey(host: str, port: int, password: str) -> None:
     """Put this Mac's key into the new box; Pro instances start password-only."""
     import paramiko
@@ -1764,11 +1785,7 @@ def pro_session(config: LifecycleConfig, *, task: str, submit_args: str,
     python = _detect_python(config, session_config)
     session_config = _pro_session_config(config, snapshot, python)
     print(f"python on the box: {python}")
-    check = _remote_train_cmd(session_config, "check")
-    print(check.stdout.strip()[-2000:])
-    if check.returncode != 0:
-        raise LifecycleError("remote_train.py check failed; leaving the instance running")
-
+    _ensure_tmux(session_config)
     sync = _remote_train_cmd(session_config, "sync")
     print(sync.stdout.strip()[-600:])
     if sync.returncode != 0:
@@ -1783,6 +1800,10 @@ def pro_session(config: LifecycleConfig, *, task: str, submit_args: str,
     print(boot.stdout.strip()[-1200:])
     if boot.returncode != 0:
         raise LifecycleError("bootstrap failed; leaving the instance running")
+    check = _remote_train_cmd(session_config, "check")
+    print(check.stdout.strip()[-2000:])
+    if check.returncode != 0:
+        raise LifecycleError("remote_train.py check failed; leaving the instance running")
 
     submit = ["submit", "--task", task, "--release", release,
               "--num-envs", "64", "--max-iterations", "20",

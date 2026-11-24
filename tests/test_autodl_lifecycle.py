@@ -79,7 +79,9 @@ def test_pro_api_sends_the_documented_power_payloads(tmp_path: Path,
     lifecycle.api_power_off(config.api, transport)
 
     status_call, on_call, off_call = transport.calls
-    assert status_call["url"].endswith("/dev/instance/pro/status")
+    assert "/dev/instance/pro/status?" in status_call["url"]
+    assert "instance_uuid=pro-test" in status_call["url"]
+    assert status_call["body"] is None
     assert status_call["method"] == "GET"
     assert on_call["url"].endswith("/dev/instance/pro/power_on")
     assert on_call["body"] == {"instance_uuid": "pro-test", "payload": "gpu"}
@@ -472,7 +474,8 @@ def test_pro_create_and_snapshot_use_the_dev_endpoints(tmp_path,
     snapshot = lifecycle.api_pro_snapshot(config.api, uuid, transport)
     assert snapshot["ssh_port"] == 34222
     assert transport.calls[0]["url"].endswith("/dev/instance/pro/create")
-    assert transport.calls[1]["url"].endswith("/dev/instance/pro/snapshot")
+    assert "/dev/instance/pro/snapshot?" in transport.calls[1]["url"]
+    assert "instance_uuid=pro-12345" in transport.calls[1]["url"]
     assert transport.calls[1]["method"] == "GET"
 
 
