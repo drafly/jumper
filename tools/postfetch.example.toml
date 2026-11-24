@@ -1,0 +1,77 @@
+# Post-fetch pipeline configuration.
+#
+# Copy to ~/.config/jumper/postfetch.toml (git-ignored) or pass --config.
+# Every value below is also the default when the file is absent, so a checkout
+# that has just run `remote_train.py fetch` works without one.
+#
+# **Nothing in this file is a secret.** A Feishu webhook lives in the environment
+# variable named by `webhook_env`; the app bot is discovered from the existing
+# DSH Feishu integration. A secret written here would be committed.
+
+[paths]
+# Where `remote_train.py fetch` writes its run directories.
+results = "outputs/remote"
+# State file, per-unit reports, videos and the pending-notification queue.
+out = "outputs/postfetch"
+
+[eval]
+# The walking sweep. Fixed on purpose: an evaluation whose commands move cannot
+# be compared with the one before it. `straight` is the forward command.
+scenarios = ["stand", "straight", "backward", "turn"]
+steps = 250        # 5 s per episode at the 50 Hz control rate
+episodes = 2
+seeds = [0, 1]
+
+# Thresholds that separate "the program ran" from "the policy performs". A unit
+# that misses one is still a program success; the report and the message say
+# both, and the raw metrics are kept in eval.json beside them.
+[eval.thresholds]
+stand_lin_err = 0.06          # m/s, |vx| + |vy| while told to stand
+straight_lin_err = 0.10       # m/s, |vx - cmd_x| + |vy| while told forward
+straight_disp_min = 0.50      # m, net displacement along the initial heading
+backward_lin_err = 0.10       # m/s
+backward_disp_max = -0.30     # m, negative: backward is negative x
+turn_yaw_err = 0.15           # rad/s, |wz - cmd|
+fall_rate_max = 0.0           # falls / episodes
+min_survival_ratio = 1.0      # mean survival steps / steps
+
+# A task is evaluated only if it appears here. Anything else is reported as
+# unsupported, not measured with the walking profile. The value names the
+# profile; only "walking" exists in this version.
+[profiles]
+"jumper.flat" = "walking"
+
+[video]
+enabled = true
+# "local" renders here through MuJoCo's off-screen renderer (CGL on macOS, EGL
+# elsewhere). "server" is a declared option with no implementation: it would
+# need libEGL (or osmesa) and ffmpeg on the box plus a checkpoint copy there, and
+# this tool does not change a server's environment. Choosing it is reported as a
+# video failure with that list, and the numeric evaluation still completes.
+backend = "local"
+width = 480
+height = 360
+fps = 25              # frames per simulated second; 25 fps at a 50 Hz task is
+                      # one frame every 0.04 s of simulation time
+seconds = 4.0
+max_bytes = 8000000
+command = [0.3, 0.0, 0.0]
+
+[feishu]
+enabled = true
+# Empty means "use the existing DSH Feishu bot and the group mapped to this
+# workspace"; fill either only to send somewhere else.
+app_id = ""
+chat_id = ""
+# A group-bot webhook can only send text (no file upload). Leave the variable
+# unset to use the app bot discovered above.
+webhook_env = "JUMPER_FEISHU_WEBHOOK"
+# Only for a genuinely public URL of a hosted video; a Mac path is never turned
+# into a link.
+public_base_url = ""
+
+[watch]
+interval_s = 60        # seconds between passes of `watch`
+max_attempts = 3       # automatic attempts per failing stage before it waits for
+                       # `postfetch retry`; a retry resets only that stage
+allow_code_mismatch = false  # true measures anyway and records the warning
