@@ -608,6 +608,16 @@ def test_market_check_skips_when_no_task_is_queued(tmp_path, monkeypatch, capsys
     assert "monitoring skipped" in capsys.readouterr().out
 
 
+def test_task_worker_does_nothing_without_a_pending_task(tmp_path, monkeypatch,
+                                                       capsys) -> None:
+    config = _config(tmp_path, backend="pro")
+    monkeypatch.setattr(lifecycle, "PENDING_TASK", tmp_path / "pending.json")
+    monkeypatch.setattr(lifecycle, "standard_instances",
+                        lambda *a, **k: pytest.fail("no task must mean no instance scan"))
+    assert lifecycle.task_worker(config) == 0
+    assert "nothing to do" in capsys.readouterr().out
+
+
 def test_pro_worker_does_nothing_without_a_pending_task(tmp_path, monkeypatch,
                                                        capsys) -> None:
     config = _config(tmp_path, backend="pro")

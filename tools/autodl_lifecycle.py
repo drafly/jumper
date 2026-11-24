@@ -1441,7 +1441,8 @@ def standard_instances(config: LifecycleConfig) -> list[dict]:
 
 
 def adopt_instance(config: LifecycleConfig, *, task: str, max_hours: float | None,
-                   shutdown: bool) -> int:
+                   shutdown: bool, instance_uuid: str = "", num_envs: int = 64,
+                   max_iterations: int = 20) -> int:
     """Take over a standard instance created by hand (the create step needs a captcha).
 
     Everything after the hand-created instance exists is automated: SSH key,
@@ -1450,12 +1451,17 @@ def adopt_instance(config: LifecycleConfig, *, task: str, max_hours: float | Non
     """
     rows = standard_instances(config)
     running = [row for row in rows if row.get("status") == "running"]
-    if not running:
+    if instance_uuid:
+        instance = next((row for row in rows if row.get("uuid") == instance_uuid), None)
+        if instance is None or instance.get("status") != "running":
+            raise LifecycleError(f"instance {instance_uuid} is not running")
+    elif running:
+        instance = running[0]
+    else:
         raise LifecycleError(
             "no running standard instance; create one in the AutoDL console first "
             "(the create page needs the human captcha)"
         )
-    instance = running[0]
     uuid = str(instance.get("uuid", ""))
     host = str(instance.get("proxy_host") or "")
     port = int(instance.get("ssh_port") or 0)
@@ -1495,7 +1501,7 @@ def adopt_instance(config: LifecycleConfig, *, task: str, max_hours: float | Non
     if check.returncode != 0:
         raise LifecycleError("remote_train.py check failed; the instance is left running")
     submit = ["submit", "--task", task, "--release", release,
-              "--num-envs", "64", "--max-iterations", "20",
+              "--num-envs", str(num_envs), "--max-iterations", str(max_iterations),
               "--max-hours", str(max_hours if max_hours is not None else 0.5)]
     result = _remote_train_cmd(session_config, *submit)
     print(result.stdout.strip()[-800:])
@@ -2021,6 +2027,97 @@ def pro_worker(config: LifecycleConfig, *, background: bool = False) -> int:
     return rc
 
 
+def _console_api_config(config: LifecycleConfig) -> ApiConfig:
+    """A console API view of the same login, for standard-instance actions."""
+    return ApiConfig(backend="browser", app_version=config.api.app_version,
+                     token_provider=lambda: browser_token(config))
+
+
+def standard_power_on(config: LifecycleConfig, instance_uuid: str) -> bool:
+    """Try a GPU power-on; False means the host has no free card right now."""
+    api = _console_api_config(config)
+    api.instance_uuid = instance_uuid
+    try:
+        api_power_on(api)
+        return True
+    except LifecycleError as exc:
+        print(f"{instance_uuid}: power-on refused: {str(exc)[:160]}")
+        return False
+
+
+def _wait_standard_running(config: LifecycleConfig, instance_uuid: str,
+                           timeout_s: float = 300.0) -> bool:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        rows = standard_instances(config)
+        row = next((candidate for candidate in rows
+                    if candidate.get("uuid") == instance_uuid), None)
+        status = row.get("status") if row else "missing"
+        if status == "running":
+            return True
+        if status == "missing":
+            return False
+        time.sleep(8.0)
+    return False
+
+
+def task_worker(config: LifecycleConfig, *, background: bool = False) -> int:
+    """Run the queued task on an existing standard instance before anything else.
+
+    "Reuse what is already rented" is the first rule: a running instance is used
+    as is, and each shut-down standard instance is offered a GPU power-on before
+    the Pro path is considered. Only when none of them can run does it fall back
+    to the low-end Pro worker.
+    """
+    task = read_pending_task()
+    if task is None:
+        print("no pending training task; nothing to do")
+        return 0
+    if background:
+        log_path = REPO / "outputs" / "autodl" / "task-worker.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = log_path.open("a", encoding="utf-8")
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "task-worker"],
+            cwd=REPO, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        print(f"task worker started in the background; log {log_path}")
+        return 0
+    rows = standard_instances(config)
+    running = [row for row in rows if row.get("status") == "running"]
+    target = str(running[0].get("uuid")) if running else ""
+    if target:
+        print(f"using running standard instance {target}")
+    else:
+        for row in rows:
+            if row.get("status") != "shutdown":
+                continue
+            uuid = str(row.get("uuid"))
+            print(f"trying to start existing standard instance {uuid}")
+            if standard_power_on(config, uuid) and _wait_standard_running(config, uuid):
+                target = uuid
+                print(f"started {uuid}")
+                break
+    if target:
+        try:
+            rc = adopt_instance(
+                config, task=str(task.get("task")), max_hours=task.get("max_hours"),
+                shutdown=False, instance_uuid=target,
+                num_envs=int(task.get("num_envs") or 64),
+                max_iterations=int(task.get("max_iterations") or 20),
+            )
+        except Exception as exc:  # noqa: BLE001 - report and fall through
+            print(f"standard task failed: {type(exc).__name__}: {str(exc)[:300]}")
+            rc = 1
+        if rc == 0:
+            PENDING_TASK.unlink(missing_ok=True)
+            print("pending task cleared")
+            return 0
+    print("no standard instance could run the task; falling back to Pro low-end stock")
+    return pro_worker(config)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2071,6 +2168,8 @@ def _parser() -> argparse.ArgumentParser:
     queue.add_argument("--submit-args", default="")
     worker = sub.add_parser("pro-worker", help="run the queued task if Pro stock exists")
     worker.add_argument("--background", action="store_true")
+    tasker = sub.add_parser("task-worker", help="run the queued task on an existing instance first")
+    tasker.add_argument("--background", action="store_true")
     adopt = sub.add_parser("adopt", help="take over a hand-created standard instance")
     adopt.add_argument("--task", default="jumper.flat")
     adopt.add_argument("--max-hours", type=float, default=None)
@@ -2159,6 +2258,8 @@ def main(argv: list[str] | None = None) -> int:
                               submit_args=args.submit_args)
             print(f"queued {args.task} -> {path}")
             return 0
+        if args.command == "task-worker":
+            return task_worker(config, background=args.background)
         if args.command == "pro-worker":
             return pro_worker(config, background=args.background)
         if args.command == "pro-plan":
@@ -2179,6 +2280,8 @@ def main(argv: list[str] | None = None) -> int:
                               submit_args=args.submit_args)
             print(f"queued {args.task} -> {path}")
             return 0
+        if args.command == "task-worker":
+            return task_worker(config, background=args.background)
         if args.command == "pro-worker":
             return pro_worker(config, background=args.background)
         if args.command == "pro-plan":
