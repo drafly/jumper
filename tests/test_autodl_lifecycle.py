@@ -598,6 +598,26 @@ def test_market_check_records_the_signature(tmp_path, monkeypatch, capsys) -> No
     assert "RTX 3080" in capsys.readouterr().out
 
 
+def test_pro_worker_does_nothing_without_a_pending_task(tmp_path, monkeypatch,
+                                                       capsys) -> None:
+    config = _config(tmp_path, backend="pro")
+    monkeypatch.setattr(lifecycle, "PENDING_TASK", tmp_path / "pending.json")
+    monkeypatch.setattr(lifecycle, "api_pro_create",
+                        lambda *a, **k: pytest.fail("no task must mean no Pro calls"))
+    assert lifecycle.pro_worker(config) == 0
+    assert "no pending" in capsys.readouterr().out
+
+
+def test_queue_task_round_trips_through_the_worker_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(lifecycle, "PENDING_TASK", tmp_path / "pending.json")
+    path = lifecycle.queue_task("jumper.flat", max_hours=1.0, num_envs=128,
+                                max_iterations=50, submit_args="")
+    task = lifecycle.read_pending_task()
+    assert path.is_file()
+    assert task is not None and task["task"] == "jumper.flat"
+    assert task["num_envs"] == 128 and task["max_iterations"] == 50
+
+
 # --------------------------------------------------------------------------
 # the sync gate
 # --------------------------------------------------------------------------

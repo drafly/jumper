@@ -1778,7 +1778,8 @@ def _wait_pro_job(session_config: Path, job_id: str, timeout_s: float) -> str:
 
 def pro_session(config: LifecycleConfig, *, task: str, submit_args: str,
                 max_hours: float | None, post: bool, retry_minutes: float,
-                dry_run: bool) -> int:
+                dry_run: bool, num_envs: int = 64,
+                max_iterations: int = 20) -> int:
     if dry_run:
         print(format_pro_plan(pro_plan(config)))
         print("[dry-run] would create/find the instance, install the key, sync, "
@@ -1832,7 +1833,7 @@ def pro_session(config: LifecycleConfig, *, task: str, submit_args: str,
         raise LifecycleError("remote_train.py check failed; leaving the instance running")
 
     submit = ["submit", "--task", task, "--release", release,
-              "--num-envs", "64", "--max-iterations", "20",
+              "--num-envs", str(num_envs), "--max-iterations", str(max_iterations),
               "--max-hours", str(max_hours if max_hours is not None else 0.5)]
     if submit_args:
         submit += ["--extra", submit_args]
@@ -1871,6 +1872,140 @@ def pro_session(config: LifecycleConfig, *, task: str, submit_args: str,
     else:
         print("auto_shutdown is off; the Pro instance is left running")
     return 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# pending training tasks: monitor Pro only while one exists
+# ──────────────────────────────────────────────────────────────────────────────
+
+PENDING_TASK = REPO / "outputs" / "autodl" / "pending-task.json"
+PRO_STATE = REPO / "outputs" / "autodl" / "pro-task-state.json"
+
+#: Low-end Pro specs only: 4080S-32G, 4090D, 4090-48G, 3090-48G.
+PRO_LOW_SPECS = ("v-32g-p", "4090D", "v-48g", "v-48g-350w")
+
+
+def read_pending_task() -> dict | None:
+    if not PENDING_TASK.is_file():
+        return None
+    try:
+        task = json.loads(PENDING_TASK.read_text("utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return task if isinstance(task, dict) and task.get("task") else None
+
+
+def queue_task(task: str, *, max_hours: float | None, num_envs: int,
+               max_iterations: int, submit_args: str = "") -> Path:
+    PENDING_TASK.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "task": task,
+        "max_hours": max_hours,
+        "num_envs": num_envs,
+        "max_iterations": max_iterations,
+        "submit_args": submit_args,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    PENDING_TASK.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                            "utf-8")
+    return PENDING_TASK
+
+
+def _feishu_text(text: str) -> None:
+    try:
+        import importlib.util as _ilu
+
+        spec = _ilu.spec_from_file_location(
+            "postfetch_feishu", REPO / "tools" / "postfetch" / "feishu.py")
+        module = _ilu.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        result = module.send(module.discover(REPO), text)
+        print(f"feishu: {result.get('status')}")
+    except Exception as exc:  # noqa: BLE001 - notification is best effort
+        print(f"feishu notification failed: {type(exc).__name__}: {exc}")
+
+
+def pro_worker(config: LifecycleConfig, *, background: bool = False) -> int:
+    """Run the pending task on a low-end Pro instance, if one is waiting.
+
+    With no pending task this returns immediately: no Pro market calls and no
+    notifications. With a task it tries only the allowed low-end specs, creates
+    from the saved private image on the first hit, runs the task in the same
+    session, then clears the queue. If no low-end card appears for six hours it
+    sends one Feishu message asking whether a high-end model may be approved.
+    """
+    task = read_pending_task()
+    if task is None:
+        print("no pending training task; Pro monitoring skipped")
+        return 0
+    if background:
+        log_path = REPO / "outputs" / "autodl" / "pro-worker.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = log_path.open("a", encoding="utf-8")
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "pro-worker"],
+            cwd=REPO, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        print(f"pro worker started in the background; log {log_path}")
+        return 0
+    allowed = [spec for spec in
+               dict.fromkeys([config.api.pro_gpu_spec, *config.api.pro_gpu_specs])
+               if spec in PRO_LOW_SPECS]
+    if not allowed:
+        raise LifecycleError(f"no low-end Pro spec configured; allowed: {PRO_LOW_SPECS}")
+    config.api.pro_gpu_spec = allowed[0]
+    config.api.pro_gpu_specs = tuple(allowed[1:])
+    try:
+        config.api.instance_uuid, _created = pro_ensure_instance(config, retry_minutes=0)
+    except LifecycleError as exc:
+        stock_out = "暂无库存" in str(exc) or "stock" in str(exc).lower()
+        if not stock_out:
+            raise
+        state = {}
+        if PRO_STATE.is_file():
+            try:
+                state = json.loads(PRO_STATE.read_text())
+            except json.JSONDecodeError:
+                state = {}
+        first = state.get("first_no_stock_at")
+        if not first:
+            first = datetime.now().astimezone().isoformat(timespec="seconds")
+        state.update({"first_no_stock_at": first, "task": task.get("task")})
+        PRO_STATE.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+                             "utf-8")
+        waited = datetime.now().astimezone() - datetime.fromisoformat(first)
+        if waited.total_seconds() >= 6 * 3600 and not state.get("escalated_at"):
+            _feishu_text(
+                "【Pro 低价卡 6 小时无库存】\n"
+                f"待执行任务：{task.get('task')}\n"
+                "4080S/4090D/4090-48G/3090-48G 均无库存。是否允许使用 4090 以上的"
+                "高性能显卡（如 5090/PRO6000）？回复批准后我会调整规格并继续自动创建。"
+            )
+            state["escalated_at"] = datetime.now().astimezone().isoformat(
+                timespec="seconds")
+            PRO_STATE.write_text(json.dumps(state, ensure_ascii=False, indent=2)
+                                 + "\n", "utf-8")
+        print(f"no low-end Pro stock for {waited}; task stays queued")
+        return 0
+    PRO_STATE.unlink(missing_ok=True)
+    print(f"Pro instance {config.api.instance_uuid} created "
+          f"({config.api.pro_gpu_spec}); running {task.get('task')}")
+    try:
+        rc = pro_session(
+            config, task=str(task.get("task")), submit_args=str(task.get("submit_args") or ""),
+            max_hours=task.get("max_hours"), post=False, retry_minutes=0,
+            dry_run=False, num_envs=int(task.get("num_envs") or 64),
+            max_iterations=int(task.get("max_iterations") or 20),
+        )
+    except Exception as exc:  # noqa: BLE001 - keep the queue for a retry/report
+        print(f"task failed: {type(exc).__name__}: {str(exc)[:300]}")
+        return 1
+    if rc == 0:
+        PENDING_TASK.unlink(missing_ok=True)
+        print("pending task cleared")
+    return rc
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1915,6 +2050,14 @@ def _parser() -> argparse.ArgumentParser:
     market.add_argument("--limit", type=int, default=20)
     market.add_argument("--json", action="store_true")
     sub.add_parser("pro-plan", help="show what the Pro API would create (read-only)")
+    queue = sub.add_parser("queue-task", help="queue one training task for the Pro worker")
+    queue.add_argument("--task", default="jumper.flat")
+    queue.add_argument("--max-hours", type=float, default=None)
+    queue.add_argument("--num-envs", type=int, default=64)
+    queue.add_argument("--max-iterations", type=int, default=20)
+    queue.add_argument("--submit-args", default="")
+    worker = sub.add_parser("pro-worker", help="run the queued task if Pro stock exists")
+    worker.add_argument("--background", action="store_true")
     adopt = sub.add_parser("adopt", help="take over a hand-created standard instance")
     adopt.add_argument("--task", default="jumper.flat")
     adopt.add_argument("--max-hours", type=float, default=None)
@@ -1994,6 +2137,15 @@ def main(argv: list[str] | None = None) -> int:
                          if part.strip())
             return market_check(config, gpus=gpus, min_idle=args.min_idle,
                                 notify=not args.no_notify)
+        if args.command == "queue-task":
+            path = queue_task(args.task, max_hours=args.max_hours,
+                              num_envs=args.num_envs,
+                              max_iterations=args.max_iterations,
+                              submit_args=args.submit_args)
+            print(f"queued {args.task} -> {path}")
+            return 0
+        if args.command == "pro-worker":
+            return pro_worker(config, background=args.background)
         if args.command == "pro-plan":
             print(format_pro_plan(pro_plan(config)))
             return 0
@@ -2005,6 +2157,15 @@ def main(argv: list[str] | None = None) -> int:
                          if part.strip())
             return market_check(config, gpus=gpus, min_idle=args.min_idle,
                                 notify=not args.no_notify)
+        if args.command == "queue-task":
+            path = queue_task(args.task, max_hours=args.max_hours,
+                              num_envs=args.num_envs,
+                              max_iterations=args.max_iterations,
+                              submit_args=args.submit_args)
+            print(f"queued {args.task} -> {path}")
+            return 0
+        if args.command == "pro-worker":
+            return pro_worker(config, background=args.background)
         if args.command == "pro-plan":
             print(format_pro_plan(pro_plan(config)))
             return 0

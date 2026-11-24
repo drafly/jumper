@@ -67,6 +67,23 @@ the official API can create a replacement unattended; the practical model is
 "create per training campaign (fast once a private image exists), release or
 shut down when done".
 
+## Queued training tasks and the Pro worker
+
+Only a queued task turns on Pro stock monitoring. Queue one with:
+
+```bash
+python tools/autodl_lifecycle.py queue-task --task jumper.flat \
+  --max-hours 2 --num-envs 4096 --max-iterations 2000
+```
+
+The hourly check runs `pro-worker` only when `outputs/autodl/pending-task.json`
+exists. With no task it makes no Pro API call and sends no notification. With a
+task it tries only the low-end specs (`v-32g-p` 4080S, `4090D`, `v-48g` 4090-48G,
+`v-48g-350w` 3090-48G), creates from the saved private image on the first hit,
+runs the task and leaves the instance running. After six hours without a low-end
+card it sends one Feishu message asking whether a high-end model may be approved;
+it does not create one without that approval.
+
 ## When the old host has no card: scan the market
 
 A shut-down instance has no GPU reserved; the host may hand its card to somebody
