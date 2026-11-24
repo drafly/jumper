@@ -752,7 +752,23 @@ if [ ! -x .venv/bin/python ]; then
   {_q(cfg.python)} -m venv --system-site-packages .venv
 fi
 .venv/bin/python -m pip install -U pip setuptools wheel {index}
-.venv/bin/python -m pip install {index}-e {_q(release_dir(cfg, rel))}
+# Pin the torch the image already provides. Without this, pip sees the project's
+# torchvision>=0.5 and the newest torchvision wants a newer torch: it would
+# download another multi-GB torch instead of using the image's CUDA build.
+TORCH_VER=$({_q(cfg.python)} -c 'import torch; print(torch.__version__.split("+")[0])')
+TV_VER=$({_q(cfg.python)} -c 'import torchvision; print(torchvision.__version__.split("+")[0])' 2>/dev/null || true)
+if [ -z "$TV_VER" ]; then
+  case "$TORCH_VER" in
+    2.8.*) TV_VER=0.23.0 ;;
+    2.7.*) TV_VER=0.22.0 ;;
+    2.9.*) TV_VER=0.24.0 ;;
+  esac
+fi
+CONSTRAINTS=$(mktemp)
+printf 'torch==%s\n' "$TORCH_VER" > "$CONSTRAINTS"
+[ -n "$TV_VER" ] && printf 'torchvision==%s\n' "$TV_VER" >> "$CONSTRAINTS"
+.venv/bin/python -m pip install {index}-c "$CONSTRAINTS" -e {_q(release_dir(cfg, rel))}
+rm -f "$CONSTRAINTS"
 """
     print(f"bootstrapping .venv from release {rel} (several minutes)")
     proc = remote.run(script, timeout=3600, check=False)
