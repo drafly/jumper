@@ -65,6 +65,10 @@ Issues = "https://github.com/KingKongRobotics/jumper/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
+# Browser-automation power management for a standard AutoDL instance
+# (`tools/autodl_lifecycle.py`). The browser itself is the system Chrome; only
+# when no Chrome is installed does Playwright download Chromium.
+browser = ["playwright>=1.40"]
 
 [build-system]
 requires = ["setuptools>=64"]

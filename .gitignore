@@ -69,3 +69,13 @@ MUJOCO_LOG.TXT
 # in .env.local, which takes precedence and is not committed.
 .env.local
 .claude/launch.json
+# tools/remote_train.py: the host, port and key path for one machine, plus the
+# known_hosts it pins and the staging it uses. The template is committed; this is
+# the local copy that names a host.
+.remote.toml
+.remote/
+.autodl.toml
+.autodl/
+
+# DSH browser/IM runtime data; never committed.
+.dsh-im/

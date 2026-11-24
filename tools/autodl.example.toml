@@ -1,0 +1,92 @@
+# AutoDL lifecycle configuration.
+#
+# Copy to ~/.config/jumper/autodl.toml (git-ignored) or pass --config.
+# **No token goes in this file.** A token is read from the environment variable
+# named below, or from a git-ignored file with mode 600.
+#
+# SSH and training settings stay in .remote.toml; this file only adds what the
+# power stage needs. With `api = "manual"` no token is needed at all: the tool
+# waits for a human-started box and still shuts it down after the sync gate.
+
+[autodl]
+# How the instance is started:
+#   "manual"  - you start it in the AutoDL console; `up` waits for SSH.
+#   "pro"     - official developer API for container instances Pro; token from
+#               AutoDL console -> account -> settings -> developer token. This is
+#               the only path with an unattended create: the API has no captcha.
+#               The Pro catalogue has no RTX 3080 Ti (see pro_gpu_spec below).
+#   "console" - the web console's own JSON API, which also works for a standard
+#               container instance but authenticates with a browser JWT that
+#               expires. Copy the Authorization header from a console request
+#               into an ignored 600-mode file; `discover` finds the uuid by SSH
+#               port. Not an official interface.
+#   "browser" - Playwright reads the same console with a persistent Chrome
+#               profile: `browser-auth` logs in once (WeChat/SMS), and every
+#               later command captures a fresh JWT headlessly. The token is used
+#               with the console API, so power actions do not depend on clicking
+#               a redesigned page. Needs `pip install -e ".[browser]"`.
+api = "manual"
+instance_uuid = ""       # Pro: "pro-..." or empty to create/find by name
+
+# The credential, never the file: export AUTODL_TOKEN=... in your shell, or
+# point token_file at a chmod-600 file outside the repository.
+token_env = "AUTODL_TOKEN"
+token_file = ""
+
+app_version = "v6.32.0"     # console API only
+# browser backend only: the profile is a full account session -- keep it 700 and
+# outside the repository. The channel falls back to Playwright's Chromium when
+# Chrome is not installed.
+browser_profile = "~/.config/jumper/autodl-browser-profile"
+browser_storage = "~/.config/jumper/autodl-storage.json"
+browser_channel = "chrome"
+browser_headless = true
+browser_timeout_s = 120
+
+# Whether a replacement instance may be created when the old host has no card.
+# `market` / `up --rent-new --dry-run` use these read-only to show the plan;
+# creating one is a separate, explicit step (not enabled yet).
+gpu_types = ["RTX 3080 Ti"]
+max_price_cny = 1.5
+instance_name = "jumper-auto"
+# Image for a replacement instance: base + image_url, community + community_uuid,
+# or private + private_image_uuid (plus private_image_url). Empty means planning
+# says so instead of guessing.
+# Container-instance-Pro create settings (api = "pro"). The docs' appendix
+# lists the specs: 3090-48G v-48g-350w, 4080S-32G v-32g-p, 4090-48G v-48g,
+# 4090D 4090D, PRO6000-96G pro6000-p, 5090-32G 5090-p, H800 h800.
+pro_gpu_spec = "v-32g-p"          # preferred; out-of-stock specs are cycled
+pro_gpu_specs = ["4090D", "v-48g", "v-48g-350w"]
+pro_cuda_from = 128
+pro_image_uuid = "base-image-l2t43iu6uk"   # PyTorch 2.0/CUDA 11.8 public image;
+                                           # the first bootstrap installs torch 2.8
+pro_data_center = []                       # e.g. ["westDC3"]; empty = auto
+pro_instance_name = "jumper-pro"
+pro_system_disk_gb = 50
+
+image_type = ""
+image_url = ""
+community_uuid = ""
+private_image_uuid = ""
+private_image_url = ""
+poll_seconds = 10
+boot_timeout_s = 900
+
+# How the instance is stopped:
+#   "ssh" - /usr/bin/shutdown inside the container (AutoDL's documented way to
+#           stop billing; works for a standard instance with no token).
+#   "api" - the configured API's power_off.
+# A finished session leaves the instance running unless this is true: low-end
+# GPUs are hard to rent again, so keep them and stop them with `down` instead.
+auto_shutdown = false
+shutdown = "ssh"
+
+# Fetch every checkpoint (not just the final one) before the sync gate passes.
+fetch_all = false
+# Run tools/postfetch on each fetched job before deciding the sync is complete.
+post_fetch = false
+
+[local]
+# Defaults to the training config's `results`.
+# results = "outputs/remote"
+log = "outputs/autodl"
