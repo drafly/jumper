@@ -1419,7 +1419,7 @@ def session(config: LifecycleConfig, *, task: str, release: str | None,
 # ──────────────────────────────────────────────────────────────────────────────
 
 #: "3080 or lower" for the fallback path.
-STANDARD_GPUS = ("RTX 3080 Ti", "RTX 3080", "RTX 3070", "RTX 3060")
+STANDARD_GPUS = ("RTX 3080 Ti", "RTX 3080", "RTX 3070", "RTX 3060", "RTX 2080 Ti")
 
 
 def _console_headers(config: LifecycleConfig) -> dict:
@@ -1469,9 +1469,11 @@ def adopt_instance(config: LifecycleConfig, *, task: str, max_hours: float | Non
         print("installed this Mac's SSH public key")
     snapshot = {"proxy_host": host, "ssh_port": port}
     session_config = _pro_session_config(
-        config, snapshot, str(getattr(config.ssh, "python", "python3")))
+        config, snapshot, str(getattr(config.ssh, "python", "python3")),
+        workdir=str(getattr(config.ssh, "workdir", "/root/jumper")))
     python = _detect_python(config, session_config)
-    session_config = _pro_session_config(config, snapshot, python)
+    session_config = _pro_session_config(config, snapshot, python,
+                                         workdir=str(getattr(config.ssh, "workdir", "/root/jumper")))
     print(f"python on the box: {python}")
     _ensure_tmux(session_config)
     sync = _remote_train_cmd(session_config, "sync")
@@ -1670,7 +1672,8 @@ def market_check(config: LifecycleConfig, *, gpus: tuple[str, ...],
     return 0
 
 
-def _pro_session_config(config: LifecycleConfig, snapshot: dict, python: str) -> Path:
+def _pro_session_config(config: LifecycleConfig, snapshot: dict, python: str,
+                        workdir: str = "/root/jumper") -> Path:
     """Write the remote_train config this Pro instance needs (never .remote.toml)."""
     host = str(snapshot.get("proxy_host") or "")
     port = int(snapshot.get("ssh_port") or 0)
@@ -1685,7 +1688,7 @@ port = {port}
 user = "root"
 identity = "{identity}"
 known_hosts = "{known}"
-workdir = "/root/jumper"
+workdir = "{workdir}"
 python = "{python}"
 results = "{config.results_dir}"
 max_hours = 1.0
@@ -1816,9 +1819,11 @@ def pro_session(config: LifecycleConfig, *, task: str, submit_args: str,
         _install_pubkey(host, port, password)
         print("installed this Mac's SSH public key")
     session_config = _pro_session_config(
-        config, snapshot, str(getattr(config.ssh, "python", "python3")))
+        config, snapshot, str(getattr(config.ssh, "python", "python3")),
+        workdir=str(getattr(config.ssh, "workdir", "/root/jumper")))
     python = _detect_python(config, session_config)
-    session_config = _pro_session_config(config, snapshot, python)
+    session_config = _pro_session_config(config, snapshot, python,
+                                         workdir=str(getattr(config.ssh, "workdir", "/root/jumper")))
     print(f"python on the box: {python}")
     _ensure_tmux(session_config)
     sync = _remote_train_cmd(session_config, "sync")
