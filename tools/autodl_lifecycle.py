@@ -2027,6 +2027,100 @@ def pro_worker(config: LifecycleConfig, *, background: bool = False) -> int:
     return rc
 
 
+STANDARD_REGIONS = {
+    "beijingDC1": "北京A区", "beijingDC2": "北京B区", "beijingDC3": "北京C区",
+    "neimengDC3": "内蒙B区", "westDC3": "西北B区", "chongqingDC1": "重庆A区",
+    "foshanDC1": "佛山区",
+}
+STANDARD_CREATE_GPUS = ("RTX 3060", "RTX 2080 Ti", "RTX 3080 Ti", "RTX 3080x2")
+
+
+def standard_create(config: LifecycleConfig, *, gpu: str, region: str,
+                    name: str = "") -> str:
+    """Drive the market UI and create one standard instance; returns its uuid.
+
+    The console create request is not reproduced: the page's UI is used, because
+    AutoDL changed that request and it now answers InternalError for a hand-built
+    body. No captcha appears for this account at the time of writing; if one
+    does, the submit does nothing and this raises, which is safer than guessing.
+    """
+    import re
+
+    responses: list[str] = []
+    with _browser_context(config, headless=True) as context:
+        page = context.pages[0] if context.pages else context.new_page()
+
+        def on_response(response) -> None:
+            if response.request.method == "POST" and "create/payg" in response.url:
+                try:
+                    responses.append(response.text())
+                except Exception as exc:  # noqa: BLE001 - the body is best effort
+                    print(f"could not read the create response: {type(exc).__name__}")
+
+        page.on("response", on_response)
+        page.goto("https://www.autodl.com/create", wait_until="domcontentloaded",
+                  timeout=60000)
+        page.wait_for_timeout(4000)
+        page.locator(f'input[value="{region}"]').check(force=True)
+        page.wait_for_timeout(900)
+        gpu_locator = page.get_by_text(gpu, exact=True)
+        if not gpu_locator.count():
+            raise LifecycleError(f"{gpu} is not offered on the create page")
+        gpu_locator.first.click()
+        page.wait_for_timeout(2200)
+        text = page.locator("body").inner_text()
+        chosen = ""
+        for radio in page.locator("input[type=radio]").all():
+            value = radio.get_attribute("value") or ""
+            if (not re.fullmatch(r"[a-z0-9]{10}", value) or radio.is_disabled()
+                    or value in _REGION_SIGNS):
+                continue
+            position = text.find(value)
+            if position < 0:
+                continue
+            rest = text[position + len(value):]
+            match = re.search(r"[a-z0-9]{10}", rest)
+            row = rest[:match.start()] if match else rest[:350]
+            if "CUDA：13." not in row and "CUDA：12.8" not in row:
+                continue
+            idle = re.search(r"(\d+)\s*/\s*(\d+)", row)
+            if idle and int(idle.group(1)) < 1:
+                continue
+            chosen = value
+            break
+        if not chosen:
+            raise LifecycleError(f"no rentable {gpu} host with CUDA>=12.8 in {region}")
+        page.locator(f'input[value="{chosen}"]').check(force=True)
+        page.wait_for_timeout(700)
+        image_input = page.locator('input[placeholder*="框架名称"]').first
+        image_input.click()
+        page.wait_for_timeout(800)
+        for label in ("PyTorch", "2.8.0", "3.12(ubuntu22.04)", "12.8"):
+            option = page.locator(".el-cascader__dropdown:visible").get_by_text(
+                label, exact=True)
+            if not option.count():
+                raise LifecycleError(f"image option {label} is missing")
+            option.first.click()
+            page.wait_for_timeout(700)
+        if name:
+            for field in page.locator("input").all():
+                placeholder = field.get_attribute("placeholder") or ""
+                if "实例名称" in placeholder and not field.get_attribute("readonly"):
+                    field.fill(name)
+                    break
+        page.get_by_text("创建并开机", exact=True).last.click(timeout=5000)
+        page.wait_for_timeout(6000)
+        if not responses:
+            tail = page.locator("body").inner_text()[-300:]
+            raise LifecycleError(f"create did not submit: {tail}")
+    payload = json.loads(responses[-1])
+    uuid = str(payload.get("data") or "")
+    if payload.get("code") != "Success" or not uuid:
+        raise LifecycleError(f"create answered {payload.get('code')!r}: "
+                             f"{str(payload.get('msg', ''))[:200]}")
+    return uuid
+
+
 def _console_api_config(config: LifecycleConfig) -> ApiConfig:
     """A console API view of the same login, for standard-instance actions."""
     return ApiConfig(backend="browser", app_version=config.api.app_version,
@@ -2099,6 +2193,21 @@ def task_worker(config: LifecycleConfig, *, background: bool = False) -> int:
                 target = uuid
                 print(f"started {uuid}")
                 break
+    if not target:
+        for region in ("beijingDC1", "neimengDC3", "westDC3"):
+            for gpu in STANDARD_CREATE_GPUS:
+                try:
+                    print(f"creating {gpu} in {region} through the create page")
+                    created = standard_create(config, gpu=gpu, region=region)
+                except LifecycleError as exc:
+                    print(f"{gpu} in {region}: {str(exc)[:160]}")
+                    continue
+                print(f"created {created}; waiting for it to run")
+                if _wait_standard_running(config, created):
+                    target = created
+                    break
+            if target:
+                break
     if target:
         try:
             rc = adopt_instance(
@@ -2168,6 +2277,11 @@ def _parser() -> argparse.ArgumentParser:
     queue.add_argument("--submit-args", default="")
     worker = sub.add_parser("pro-worker", help="run the queued task if Pro stock exists")
     worker.add_argument("--background", action="store_true")
+    create_std = sub.add_parser("standard-create",
+                                help="create a low-end standard instance through the UI")
+    create_std.add_argument("--gpu", default="RTX 2080 Ti")
+    create_std.add_argument("--region", default="beijingDC1")
+    create_std.add_argument("--name", default="")
     tasker = sub.add_parser("task-worker", help="run the queued task on an existing instance first")
     tasker.add_argument("--background", action="store_true")
     adopt = sub.add_parser("adopt", help="take over a hand-created standard instance")
@@ -2258,6 +2372,10 @@ def main(argv: list[str] | None = None) -> int:
                               submit_args=args.submit_args)
             print(f"queued {args.task} -> {path}")
             return 0
+        if args.command == "standard-create":
+            print(standard_create(config, gpu=args.gpu, region=args.region,
+                                  name=args.name))
+            return 0
         if args.command == "task-worker":
             return task_worker(config, background=args.background)
         if args.command == "pro-worker":
@@ -2279,6 +2397,10 @@ def main(argv: list[str] | None = None) -> int:
                               max_iterations=args.max_iterations,
                               submit_args=args.submit_args)
             print(f"queued {args.task} -> {path}")
+            return 0
+        if args.command == "standard-create":
+            print(standard_create(config, gpu=args.gpu, region=args.region,
+                                  name=args.name))
             return 0
         if args.command == "task-worker":
             return task_worker(config, background=args.background)
