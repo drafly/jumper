@@ -1512,11 +1512,10 @@ def standard_available(config: LifecycleConfig,
     """What the create page would actually let this account rent.
 
     The machine-list API's `gpu_idle_num` and the create page disagree; only the
-    page's enabled machine radios predict whether "创建并开机" can work, so the
-    check reads that instead. The page re-renders asynchronously, so an enabled
-    radio is accepted only after two stable reads **and** when the selected GPU's
-    name appears in that machine's row; otherwise a default PRO 6000 selection
-    would be reported as a 3080 Ti.
+    page's enabled machine radios predict whether "创建并开机" can work. The page
+    re-renders asynchronously and keeps the previous GPU's rows, so every GPU is
+    checked on a **fresh page load** and a machine counts only when its own row
+    contains the selected GPU's name.
     """
     import re
 
@@ -1535,10 +1534,10 @@ def standard_available(config: LifecycleConfig,
     found: list[dict] = []
     with _browser_context(config, headless=True) as context:
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto("https://www.autodl.com/create", wait_until="domcontentloaded",
-                  timeout=60000)
-        page.wait_for_timeout(3500)
         for gpu in gpus:
+            page.goto("https://www.autodl.com/create", wait_until="domcontentloaded",
+                      timeout=60000)
+            page.wait_for_timeout(3500)
             locator = page.get_by_text(gpu, exact=True)
             if not locator.count():
                 continue
@@ -1548,23 +1547,23 @@ def standard_available(config: LifecycleConfig,
                 print(f"{gpu}: could not select it on the create page "
                       f"({type(exc).__name__})")
                 continue
-            stable: list[str] = []
-            for _ in range(4):
-                page.wait_for_timeout(1600)
-                text = page.locator("body").inner_text()
-                current = [machine_id for machine_id in machine_ids()
-                           if re.search(re.escape(machine_id) + r"[\s\S]{0,320}?"
-                                        + re.escape(gpu), text)]
-                if current and current == stable:
-                    break
-                stable = current
-            machines = []
+            page.wait_for_timeout(3000)
             text = page.locator("body").inner_text()
-            for machine_id in stable:
-                match = re.search(re.escape(machine_id) + r"([\s\S]{0,500})", text)
-                window = match.group(1) if match else ""
-                alias = re.search(r"([A-Za-z0-9]+机)", window)
-                price = re.search(r"￥([0-9.]+)/时", window)
+            machines = []
+            for machine_id in machine_ids():
+                position = text.find(machine_id)
+                if position < 0:
+                    continue
+                # the row ends at the next machine id; a stale row from another
+                # GPU therefore cannot pass the name check below
+                rest = text[position + len(machine_id):]
+                next_ids = [match.start() for match in
+                            re.finditer(r"[a-z0-9]{10}", rest)]
+                row = rest[:next_ids[0]] if next_ids else rest[:500]
+                if gpu not in row:
+                    continue
+                alias = re.search(r"([A-Za-z0-9]+机)", row)
+                price = re.search(r"￥([0-9.]+)/时", row)
                 machines.append({
                     "machine_id": machine_id,
                     "alias": alias.group(1) if alias else "",
