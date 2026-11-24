@@ -479,6 +479,27 @@ def test_pro_create_and_snapshot_use_the_dev_endpoints(tmp_path,
     assert transport.calls[1]["method"] == "GET"
 
 
+def test_pro_image_save_and_list_use_the_dev_endpoints(tmp_path,
+                                                       monkeypatch) -> None:
+    monkeypatch.setenv("AUTODL_TEST_TOKEN", "secret-dev-token")
+    config = _config(tmp_path, backend="pro")
+    transport = Recorder([
+        {"code": "Success", "data": {"image_uuid": "image-abc"}},
+        {"code": "Success", "data": {"list": [
+            {"image_uuid": "image-abc", "name": "jumper-pro-ready",
+             "status": "finished", "image_size": 2445271040},
+        ]}},
+    ])
+    image_uuid = lifecycle.api_pro_image_save(
+        config.api, "pro-x", "jumper-pro-ready", transport)
+    assert image_uuid == "image-abc"
+    assert transport.calls[0]["body"] == {
+        "instance_uuid": "pro-x", "image_name": "jumper-pro-ready"}
+    images = lifecycle.api_pro_images(config.api, transport)
+    assert images[0]["status"] == "finished"
+    assert transport.calls[1]["url"].endswith("/dev/instance/pro/image/private/list")
+
+
 def test_pro_plan_says_what_the_catalogue_cannot_do(tmp_path) -> None:
     config = _config(tmp_path, backend="pro")
     plan = lifecycle.pro_plan(config)

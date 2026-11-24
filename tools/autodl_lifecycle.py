@@ -461,6 +461,33 @@ def api_pro_snapshot(config: ApiConfig, instance_uuid: str, transport=_request) 
     return data if isinstance(data, dict) else {}
 
 
+def api_pro_image_save(config: ApiConfig, instance_uuid: str, image_name: str,
+                       transport=_request) -> str:
+    """Snapshot the instance's system disk; returns the new private image uuid."""
+    payload = _expect_success(
+        transport(_pro_url("image/save"),
+                  {"instance_uuid": instance_uuid, "image_name": image_name},
+                  _api_headers(config)),
+        "image save",
+    )
+    data = payload.get("data", {})
+    image_uuid = str(data.get("image_uuid") or "") if isinstance(data, dict) else ""
+    if not image_uuid:
+        raise LifecycleError("image save returned no image uuid")
+    return image_uuid
+
+
+def api_pro_images(config: ApiConfig, transport=_request) -> list[dict]:
+    """The account's private Pro images, with their save status."""
+    payload = _expect_success(
+        transport(_pro_url("image/private/list"),
+                  {"page_index": 1, "page_size": 100}, _api_headers(config)),
+        "image list",
+    )
+    data = payload.get("data", {})
+    return list(data.get("list", [])) if isinstance(data, dict) else []
+
+
 def api_pro_release(config: ApiConfig, instance_uuid: str, transport=_request) -> None:
     _expect_success(
         transport(_pro_url("release"), {"instance_uuid": instance_uuid},
