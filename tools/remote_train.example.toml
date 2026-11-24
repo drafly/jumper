@@ -1,0 +1,29 @@
+# Copy to .remote.toml (git-ignored) or ~/.config/jumper/remote.toml.
+# Nothing here is secret: `identity` is a path, not a key.
+
+# Either an ssh alias from ~/.ssh/config ...
+host = "autodl"
+
+# ... or the connection details directly. Use one or the other, not both.
+# hostname = "connect.xxx.seetacloud.com"
+# port = 24227
+# user = "root"
+# identity = "~/.ssh/id_ed25519"
+# known_hosts = ".remote/known_hosts"
+
+workdir = "/root/autodl-tmp/jumper"      # absolute; keep it on the data disk
+python = "/root/miniconda3/bin/python"   # interpreter that creates .venv
+results = "~/jumper-runs"                # local download root
+max_hours = 6.0                          # default wall-clock limit per job
+# On AutoDL the default PyPI is slow from China; a mirror is explicit, because
+# `network_turbo` proxies GitHub and makes pip slower, not faster.
+pip_index = "https://pypi.tuna.tsinghua.edu.cn/simple"
+
+# Training defaults, overridden per submit.
+backend = "warp"
+device = "cuda:0"
+num_envs = 64
+# egl for camera sensors; disabled when the box has no libEGL (training without
+# rendering does not need it).
+mujoco_gl = "egl"
+tensorboard_port = 6006
