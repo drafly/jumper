@@ -309,6 +309,9 @@ def _run(spec, res, asset: Path | None, args) -> None:
     env_cfg = tasks.load_env_cfg(
         spec.id, asset=asset, play=True, task_args=args.task_args
     )
+    if getattr(args, "seed", None) is not None:
+        env_cfg.seed = args.seed
+        print(f"[mjrl] replay seed {args.seed}")
     _set_physics_rate(env_cfg, args.physics_hz)
     if args.app is not None:
         from mjrl.app_play import AppUnavailable, step_the_world_at

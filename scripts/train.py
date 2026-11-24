@@ -115,6 +115,21 @@ def _run(spec, res, asset: Path | None, args) -> None:
     from mjlab.rl.runner import MjlabOnPolicyRunner
 
     env_cfg = tasks.load_env_cfg(spec.id, asset=asset, task_args=args.task_args)
+    if args.seed is not None:
+        # The manager-based env seeds itself from `cfg.seed`; torch/numpy cover
+        # network initialisation and action sampling, which rsl_rl leaves alone.
+        import random
+
+        import numpy as np
+        import torch
+
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        env_cfg.seed = args.seed
+        print(f"[mjrl] seed {args.seed} (environment + torch + numpy)")
     apply_scene(env_cfg, args, for_training=True)
     env_cfg.scene.num_envs = res.num_envs
     agent_cfg = tasks.load_agent_cfg(spec.id)

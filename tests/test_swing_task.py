@@ -903,7 +903,11 @@ def test_the_task_declares_its_own_flag() -> None:
     accepted = set(inspect.signature(env_cfg).parameters)
     assert set(names) <= accepted, f"{set(names) - accepted} is not an env_cfg argument"
 
-    for other in ("jumper.flat", "jumper.tripod", "jumper.dance"):
+    # `jumper.flat` is deliberately not in this control: it declares a
+    # diagnostic flag of its own (`--flat-forward-envs`) through the same hook.
+    # The property this test pins is that the hook is asked per task -- a task
+    # that declares nothing must receive nothing, whatever its neighbour does.
+    for other in ("jumper.tetrapod", "jumper.tripod", "jumper.dance"):
         assert tasks.load_cli_args(other) is None, (
             f"{other} would also get --swing-angle, so the flag is not the task's"
         )

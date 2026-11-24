@@ -98,6 +98,15 @@ def build_parser(
         "default asset",
     )
     p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="seed the environment, torch and numpy. The environment seed is "
+        "written into the run's params/ and printed, so a run can be traced to "
+        "the seed it actually used. rsl_rl has no seed setting of its own; the "
+        "torch seed covers network initialisation and action sampling",
+    )
+    p.add_argument(
         "--list",
         action="store_true",
         help="list every registered task with its available assets, then exit",

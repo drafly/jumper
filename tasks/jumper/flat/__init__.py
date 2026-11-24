@@ -28,3 +28,29 @@ register(
     description="jumper hexapod flat-ground velocity tracking; no gait prior (the one-variable control for tetrapod and ripple)",
     tags=("locomotion", "jumper", "flat", "base"),
 )
+
+
+def cli_args(group):
+    """This task's own command-line arguments; see `tasks.load_cli_args`.
+
+    A diagnostic knob, not a tuning value: the default is None, which leaves the
+    shared skeleton's `rel_forward_envs = 0.0` exactly as the baseline has it.
+    `--flat-forward-envs 0.2` is the single-factor change of the controlled
+    forward-bias experiment; the reasoning for why this task's ladder makes the
+    0.3 m/s upstream floor legitimate is in `env_cfg.py` beside the assignment.
+
+    Declared here rather than in `scripts/_cli.py` because it is this task's
+    vocabulary, and `__init__.py` is the one module of a task that is always
+    imported; declaring an argument needs `argparse` and nothing else.
+    """
+    group.add_argument(
+        "--flat-forward-envs",
+        dest="flat_forward_envs",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help="fraction of environments given upstream's forward-only command "
+        "(0.3 m/s floor); None keeps the baseline 0.0. Diagnostic, for the "
+        "controlled forward-command-bias experiment",
+    )
+    return ("flat_forward_envs",)

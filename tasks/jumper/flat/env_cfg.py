@@ -51,13 +51,23 @@ FLAT_TOP_LIN = 0.80
 FLAT_TOP_ANG = 1.00
 
 
-def env_cfg(asset: Path | None = None, play: bool = False) -> ManagerBasedRlEnvCfg:
+def env_cfg(
+    asset: Path | None = None,
+    play: bool = False,
+    flat_forward_envs: float | None = None,
+) -> ManagerBasedRlEnvCfg:
     """Build this task's environment config.
 
     Args:
         asset: model XML path, from `--model`. None uses the default jumper.xml.
         play: replay mode -- observation noise and external disturbances off,
             longer episodes.
+        flat_forward_envs: the fraction of environments given a forward-only
+            command, or None for the shared skeleton's 0.0. A **diagnostic
+            knob** for the controlled forward-bias experiment, not a tuning
+            value: None reproduces the baseline exactly, so a run either turns
+            it on deliberately or does not touch it. Why this task may turn it
+            on is in the block below that applies it.
     """
     cfg = velocity_env_cfg(
         # This task's own operator controls. Named here rather than inherited:
@@ -125,6 +135,27 @@ def env_cfg(asset: Path | None = None, play: bool = False) -> ManagerBasedRlEnvC
     cfg.rewards["foot_clearance"].weight = -4.0
     cfg.rewards["foot_swing_height"].weight = -3.0
     cfg.commands["twist"].rel_standing_envs = 0.2
+
+    # ── Diagnostic knob: forward-only envs, and why this task can have them ──
+    # The shared skeleton sets `rel_forward_envs = 0.0` because upstream's
+    # forward-only command carries a hardcoded 0.3 m/s floor, and on the shared
+    # ladder that is larger than the first rung (`LEVELS[0] = 0.25`): 20% of
+    # environments would ignore the level they are meant to train at.
+    #
+    # **That reason does not apply here.** This task's ladder is `ladder(0.8)` =
+    # 0.4 / 0.56 / 0.8 / 0.8, so level 0 already covers +/-0.4 and the literal
+    # 0.3 floor sits inside it at every rung. Turning the fraction on therefore
+    # asks for a command this task's first level can express; it is not a
+    # second, larger range smuggled in.
+    #
+    # What it is worth testing: the command distribution is symmetric plus 20%
+    # zero commands, so nothing ever asks for *sustained* forward motion, and
+    # the measured policy stands. `flat_forward_envs = 0.2` restores upstream's
+    # forward coverage at a command the level can hold. It is one field and one
+    # hypothesis: the reward, the exploration settings and the curriculum are
+    # deliberately untouched by this experiment.
+    if flat_forward_envs is not None:
+        cfg.commands["twist"].rel_forward_envs = flat_forward_envs
 
     # The dToF, which the model carries (`common/tof.py`). Replay only, where the
     # live viewer shows it in the window's corner; nothing in training reads it,
