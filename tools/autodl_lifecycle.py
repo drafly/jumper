@@ -1506,9 +1506,24 @@ def standard_available(config: LifecycleConfig,
 
     The machine-list API's `gpu_idle_num` and the create page disagree; only the
     page's enabled machine radios predict whether "创建并开机" can work, so the
-    check reads that instead. Returns one row per GPU with the enabled machines.
+    check reads that instead. The page re-renders asynchronously, so an enabled
+    radio is accepted only after two stable reads **and** when the selected GPU's
+    name appears in that machine's row; otherwise a default PRO 6000 selection
+    would be reported as a 3080 Ti.
     """
     import re
+
+    def machine_ids() -> list[str]:
+        found_ids = []
+        for radio in page.locator("input[type=radio]").all():
+            value = radio.get_attribute("value") or ""
+            if value in _REGION_SIGNS or value.isdigit():
+                continue
+            if not re.fullmatch(r"[a-z0-9]{10}", value):
+                continue
+            if not radio.is_disabled():
+                found_ids.append(value)
+        return found_ids
 
     found: list[dict] = []
     with _browser_context(config, headless=True) as context:
@@ -1522,45 +1537,35 @@ def standard_available(config: LifecycleConfig,
                 continue
             try:
                 locator.first.click(timeout=5000)
-            except Exception as exc:  # noqa: BLE001 - one GPU missing must not stop the rest
+            except Exception as exc:  # noqa: BLE001 - one GPU must not stop the rest
                 print(f"{gpu}: could not select it on the create page "
                       f"({type(exc).__name__})")
                 continue
-            page.wait_for_timeout(1800)
-            ids = []
-            for radio in page.locator("input[type=radio]").all():
-                value = radio.get_attribute("value") or ""
-                if value in _REGION_SIGNS or value.isdigit():
-                    continue
-                if not re.fullmatch(r"[a-z0-9]{10}", value):
-                    continue
-                if not radio.is_disabled():
-                    ids.append(value)
-            if not ids:
-                found.append({"gpu": gpu, "machines": [], "total": 0})
-                continue
-            text = page.locator("body").inner_text()
+            stable: list[str] = []
+            for _ in range(4):
+                page.wait_for_timeout(1600)
+                text = page.locator("body").inner_text()
+                current = [machine_id for machine_id in machine_ids()
+                           if re.search(re.escape(machine_id) + r"[\s\S]{0,320}?"
+                                        + re.escape(gpu), text)]
+                if current and current == stable:
+                    break
+                stable = current
             machines = []
-            for machine_id in ids:
-                match = re.search(
-                    re.escape(machine_id)
-                    + r"\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*"
-                      r"(\d+)\s*/\s*(\d+)\s*\|\s*([^|]*)\s*\|\s*([^|]*)\s*\|\s*"
-                      r"([^|]*)\s*\|\s*([^|]*)\s*\|\s*([^|]*)\s*\|\s*([^|]*)\s*\|\s*"
-                      r"([^\n|]+)\s*\|\s*([^\n|]+)",
-                    text,
-                )
-                if match:
-                    machines.append({
-                        "machine_id": machine_id,
-                        "alias": match.group(2).strip(),
-                        "region": "",
-                        "price": match.group(12).strip(),
-                    })
-                else:
-                    machines.append({"machine_id": machine_id, "alias": "", "region": "",
-                                     "price": ""})
-            found.append({"gpu": gpu, "machines": machines, "total": len(ids)})
+            text = page.locator("body").inner_text()
+            for machine_id in stable:
+                match = re.search(re.escape(machine_id) + r"([\s\S]{0,500})", text)
+                window = match.group(1) if match else ""
+                alias = re.search(r"([A-Za-z0-9]+机)", window)
+                price = re.search(r"￥([0-9.]+)/时", window)
+                machines.append({
+                    "machine_id": machine_id,
+                    "alias": alias.group(1) if alias else "",
+                    "region": "",
+                    "price": f"￥{price.group(1)}/时" if price else "",
+                })
+            found.append({"gpu": gpu, "machines": machines,
+                          "total": len(machines)})
     return found
 
 
